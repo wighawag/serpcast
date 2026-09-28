@@ -40,6 +40,9 @@
 		"dist"
 	],
 	"dependencies": {
+		"css-select": "^7.0.0",
+		"domhandler": "^6.0.1",
+		"htmlparser2": "^12.0.0",
 		"koffi": "^3.3.2",
 		"serpcast-recipe": "workspace:*"
 	},
