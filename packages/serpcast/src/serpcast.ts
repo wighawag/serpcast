@@ -14,13 +14,15 @@
 // Cooldowns and sessions live in the injected state store (store.ts), keyed
 // per engine name; each record carries its own time, checked with serpcast's
 // clock, and a TTL so the store can drop it. A session (the engine's
-// transport-session cookies) is loaded before the engine runs and saved after,
-// whatever the outcome, so challenge cookies survive; concurrent searches on
+// transport-session cookies, plus a code recipe's JSON state) is loaded before
+// the engine runs and saved after, whatever the outcome, so challenge cookies
+// survive; concurrent searches on
 // one engine race and the last save wins. `serpcast/sessions` indexes the
 // engines with a session, so `clearSessions()` finds them in any store.
 // Decisions and alternatives: work/notes/observations/engine-chain-and-state-decisions.md.
 
 import type {Recipe} from 'serpcast-recipe';
+import {isCodeRecipe, runCodeRecipe, type CodeRecipe} from './code.js';
 import type {StoredCookie} from './cookies.js';
 import {runDeclarativeRecipe, type SearchResult} from './declarative.js';
 import {SerpcastError, type EngineFailure} from './errors.js';
@@ -31,15 +33,15 @@ import {
 	type TransportOptions,
 } from './transport.js';
 
-/** One engine of a chain. For now a declarative recipe (identified by its name). */
-export type Engine = Recipe;
+/** One engine of a chain, identified by its name: a declarative or a code recipe. */
+export type Engine = Recipe | CodeRecipe;
 
 export interface SerpcastOptions extends TransportOptions {
 	/** Where sessions and cooldowns live. Default: in memory, per instance. */
 	store?: StateStore;
 	/** How long an engine that answered `blocked` is skipped, in ms. Default 5 minutes. */
 	cooldownMs?: number;
-	/** An engine's session (cookies) is dropped after this long unused, in ms. Default 10 minutes. */
+	/** An engine's session (cookies and code-recipe state) is dropped after this long unused, in ms. Default 10 minutes. */
 	sessionIdleMs?: number;
 	/** The clock for cooldowns and sessions (and the default store), in ms since the epoch. */
 	now?: () => number;
@@ -83,6 +85,8 @@ const key = (engine: string, what: 'session' | 'cooldown') =>
 interface SessionRecord {
 	cookies: StoredCookie[];
 	lastUsed: number;
+	/** A code recipe's `ctx.session` state. */
+	state?: {[key: string]: JsonValue};
 }
 
 export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
@@ -99,7 +103,11 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 		return typeof until === 'number' && until > now() ? until : undefined;
 	}
 
-	async function run(engine: Engine, query: string, signal?: AbortSignal) {
+	async function run(
+		engine: Engine,
+		query: string,
+		{signal, maxResults}: Omit<SearchOptions, 'engines'>,
+	) {
 		const saved = (await store.get(key(engine.name, 'session'))) as
 			Partial<SessionRecord> | null | undefined;
 		const fresh =
@@ -107,16 +115,26 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 			typeof saved.lastUsed === 'number' &&
 			now() - saved.lastUsed < idleMs;
 		const session = transport.session(fresh ? saved!.cookies : []);
+		const kept = fresh ? saved!.state : undefined;
+		const state =
+			typeof kept === 'object' && kept !== null && !Array.isArray(kept)
+				? kept
+				: {};
 		try {
-			const response = await runDeclarativeRecipe(engine, query, {
-				session,
-				signal,
-			});
+			const response = isCodeRecipe(engine)
+				? await runCodeRecipe(engine, query, {
+						session,
+						state,
+						signal,
+						maxResults,
+					})
+				: await runDeclarativeRecipe(engine, query, {session, signal});
 			return response.results;
 		} finally {
 			const record: SessionRecord = {
 				cookies: session.cookies(),
 				lastUsed: now(),
+				...(Object.keys(state).length > 0 && {state}),
 			};
 			await store.set(
 				key(engine.name, 'session'),
@@ -155,7 +173,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 					continue;
 				}
 				try {
-					const results = await run(engine, query, signal);
+					const results = await run(engine, query, {signal, maxResults});
 					return {
 						results:
 							maxResults === undefined ? results : results.slice(0, maxResults),

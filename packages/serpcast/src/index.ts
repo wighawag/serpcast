@@ -1,6 +1,6 @@
 // serpcast's library entry: the engine chain (`createSerpcast`), the state
-// store, the transport layer and the declarative recipe runner. Code recipes
-// and the browser engine arrive with their tasks (see work/tasks/).
+// store, the transport layer and the declarative and code recipe runners. The
+// browser engine arrives with its task (see work/tasks/).
 
 export {
 	SerpcastError,
@@ -37,6 +37,17 @@ export {
 	type RunRecipeOptions,
 	type SearchResult,
 } from './declarative.js';
+export {
+	isCodeRecipe,
+	loadCodeRecipe,
+	runCodeRecipe,
+	type CodeRecipe,
+	type CodeRecipeContext,
+	type CodeRecipeHttp,
+	type CodeRecipeSession,
+	type HttpOptions,
+	type RunCodeRecipeOptions,
+} from './code.js';
 export {CookieStore, type StoredCookie} from './cookies.js';
 export {
 	LIBCURL_IMPERSONATE,

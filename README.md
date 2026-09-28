@@ -9,7 +9,7 @@ Getting keyless web search results today usually means running SearXNG. What Sea
 - Engines are tried as an ordered **engine chain**, first answer wins, with searchcast (a real browser) as the fallback when HTTP is blocked.
 - serpcast is **not** an anonymity tool, and it is built so one can use it safely: the caller injects the proxy, the state store and the recipe set; serpcast makes no network call the caller did not cause and writes nothing to disk on its own ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)).
 
-Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport and the declarative recipe runner, with `serpcast query` for recipe development.
+Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner and code recipes, with `serpcast query` for recipe development.
 
 ## Packages
 
@@ -69,7 +69,7 @@ await serpcast.close();
 | `now`           | `Date.now`                         | The clock for cooldowns and sessions (and the default store).                                         |
 | `transport`     | created from the transport options | A transport to use instead (tests, or sharing one between instances).                                 |
 
-`search(query, {engines, maxResults?, signal?})`: an engine is, for now, a declarative recipe, identified by its `name`; code recipes and searchcast (browser) engines come next. `maxResults` cuts the answer (each recipe's `limit` still applies). How each outcome is handled:
+`search(query, {engines, maxResults?, signal?})`: an engine is a declarative recipe or a [code recipe](#code-recipes), identified by its `name`; searchcast (browser) engines come next. `maxResults` cuts the answer (each recipe's `limit` still applies). How each outcome is handled:
 
 - **Results or an `empty` match**: returned as `{results, engine, failures}`. Later engines are not called.
 - **`blocked`, `recipe`, `timeout`, `transport`**: recorded in `failures` and the next engine is tried. `blocked` also starts the engine's **cooldown**: until it ends, the engine is skipped and listed in `failures` with a `blocked` error saying it is cooling down (so an all-skipped chain still says why).
@@ -93,7 +93,7 @@ interface StateStore {
 
 serpcast namespaces its keys per engine name: `engine/<name>/session` (the engine's cookies and last use) and `engine/<name>/cooldown` (when it ends), with `<name>` URL-encoded, plus `serpcast/sessions`, the list of engines with a session (so `clearSessions()` finds them in any store). Every value carries the time serpcast relies on and is checked with serpcast's clock, and every `set` passes a `ttlMs` so the store can drop it; a store that expires late is still correct. Give each identity its own store (or key prefix) to keep their sessions apart.
 
-**Sessions.** Each engine gets a transport session whose cookies are loaded from the store before the engine runs and saved after, whatever the outcome (a challenge page may set the cookie that lets the next attempt through). A session unused for `sessionIdleMs` is dropped, and `clearSessions(engine?)` drops one engine's session or all of them. Two concurrent searches on the same engine each save their own cookies; the last save wins.
+**Sessions.** Each engine gets a transport session whose cookies (and, for a code recipe, its `ctx.session` state) are loaded from the store before the engine runs and saved after, whatever the outcome (a challenge page may set the cookie that lets the next attempt through). A session unused for `sessionIdleMs` is dropped, and `clearSessions(engine?)` drops one engine's session or all of them. Two concurrent searches on the same engine each save their own cookies; the last save wins.
 
 ## Declarative recipes over HTTP
 
@@ -128,6 +128,51 @@ Other differences come from having no browser: no JavaScript runs, so a site tha
 
 HTML is parsed with [htmlparser2](https://github.com/fb55/htmlparser2) and queried with [css-select](https://github.com/fb55/css-select) (cheerio's core, without cheerio): about 2.4 MB installed for the whole dependency closure, about 320 KB of it JavaScript, and it supports the selectors recipes use (combinators, attribute operators, `:not`, `:is`, `:has`). An invalid selector is a `recipe` error.
 
+## Code recipes
+
+A code recipe is a JS module for a site that needs challenge handling or a non-HTML API. **A code recipe is code with full Node access**: loading one runs it, and nothing stops it from importing `fs` or opening its own sockets. serpcast hands it only the context below, but which modules to load is your trust decision ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)). **Only load recipes you trust.** Recipes live anywhere on disk (private ones never need to be in this repo) and are loaded only from the path you give; serpcast never looks for them.
+
+```js
+// ./my-api.mjs: an example for a keyless JSON API. The endpoint is a placeholder:
+// point it at an API whose terms allow automated access.
+export default {
+	name: 'my-api',
+	timeoutMs: 10_000, // the whole search; optional, default 15 s
+	async search(query, ctx) {
+		const data = await ctx.http.json(`https://api.example.com/search?q=${encodeURIComponent(query)}`, {kind: 'document'});
+		if (data.captcha) ctx.blocked('the API asks for a captcha');
+		if (!Array.isArray(data.items)) ctx.recipeError('no "items" in the response');
+		return data.items.slice(0, ctx.maxResults).map((item) => ({title: item.title, url: item.link, snippet: item.summary}));
+	},
+};
+```
+
+```ts
+import {createSerpcast, loadCodeRecipe} from 'serpcast';
+import {loadRecipeFile} from 'serpcast-recipe/node';
+
+const serpcast = createSerpcast({proxy: 'socks5h://127.0.0.1:9050'});
+const myApi = await loadCodeRecipe('./my-api.mjs'); // imports (runs) the module
+const {results} = await serpcast.search('some query', {engines: [myApi, loadRecipeFile('./fallback.json')]});
+```
+
+`loadCodeRecipe(path)` imports the ESM module at `path` (relative to the working directory) and returns its default export, which must be `{name, search(query, ctx), timeoutMs?}`; a module that cannot be imported or has another shape is a `recipe` error. A code recipe goes in the engine chain like a declarative one (same failures, cooldowns and sessions), and `runCodeRecipe(recipe, query, {session, state?, signal?, maxResults?})` runs one outside a chain. `search` returns (or resolves to) the results; `ctx` is:
+
+| member                          | what it is                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `http.get(url, {kind, referer?, timeoutMs?})` | A GET through the engine's transport session: the caller's proxy, the pinned Chrome fingerprint and the header table of `kind` (`document`, `same-origin-navigation`, `fetch`, `script`; all but `document` need a `referer`), with the engine's cookies sent and kept. Resolves to the raw response (`status`, `headers`, `body`, `text()`), whatever its status; redirects are not followed. GET only for now. |
+| `http.text(url, options)`       | The body as text. Statuses map as for declarative recipes: 202, 403, 429 are `blocked`; 404, 410 are `recipe`; any other non-2xx (3xx included) is `transport`.                                                                                                                                                                                                                                                 |
+| `http.json(url, options)`       | The body parsed as JSON, statuses as for `text`. A body that is not JSON (often a challenge page) is a `recipe` error.                                                                                                                                                                                                                                                                                           |
+| `session.get(key)`, `session.set(key, value)`, `session.delete(key)` | The engine's own JSON state (a token, a challenge answer), kept in the state store with its cookies: saved after every run whatever the outcome, dropped after `sessionIdleMs` unused or by `clearSessions()`. Values are copied; a value that is not plain JSON is a `recipe` error.                                                                                                                            |
+| `signal`                        | Aborts on the caller's abort or the recipe's `timeoutMs`. Every `http` request already carries it.                                                                                                                                                                                                                                                                                                              |
+| `maxResults`                    | The caller's `maxResults`, when given (the answer is cut to it anyway).                                                                                                                                                                                                                                                                                                                                         |
+| `blocked(message)`              | Throws a `blocked` error: the engine's cooldown starts.                                                                                                                                                                                                                                                                                                                                                         |
+| `recipeError(message)`          | Throws a `recipe` error (the site no longer fits the recipe).                                                                                                                                                                                                                                                                                                                                                   |
+
+The results are validated: an array of `{title, url, snippet?, ...}` with a non-empty `title` and `url` and every field a string (fields set to `undefined` are dropped). Anything else is a `recipe` error, and so is any throw that is not a `SerpcastError` (with the original as `cause`). `[]` is a valid answer: the module says the site has no results, and the chain stops there, so throw `recipeError` when the response is not one you understand. The whole search is bounded by `timeoutMs` (a `timeout` error); aborting the caller's `signal` rejects with its reason.
+
+serpcast ships no code recipe for a real site: write your own, for engines whose terms allow automated access.
+
 ## CLI: `serpcast query`
 
 For recipe development, `serpcast query` runs one declarative recipe once through the impersonated transport:
@@ -160,8 +205,9 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 
 | module             | LOC | target |
 | ------------------ | --: | -----: |
+| `src/code.ts`        | 304 |    320 |
 | `src/transport.ts`   | 280 |    300 |
-| `src/serpcast.ts`    | 210 |    240 |
+| `src/serpcast.ts`    | 228 |    240 |
 | `src/libcurl.ts`     | 246 |    260 |
 | `src/declarative.ts` | 199 |    220 |
 | `src/cookies.ts`     | 155 |    170 |
@@ -169,11 +215,11 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 | `src/chrome.ts`      | 122 |    150 |
 | `src/response.ts`    |  98 |    120 |
 | `src/cli.ts`         |  90 |    120 |
-| `src/index.ts`       |  81 |    100 |
+| `src/index.ts`       |  92 |    100 |
 | `src/store.ts`       |  63 |     80 |
 | `src/errors.ts`      |  36 |     40 |
 
-**Total own source: 1706 LOC** (excluding deps).
+**Total own source: 2039 LOC** (excluding deps).
 
 ## Develop
 

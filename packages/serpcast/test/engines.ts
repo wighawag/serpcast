@@ -8,6 +8,7 @@ import {
 	CookieStore,
 	createMemoryStore,
 	type JsonValue,
+	type RequestOptions,
 	type StateStore,
 	type StoredCookie,
 	type Transport,
@@ -17,13 +18,24 @@ import {item, resultsPage} from './pages.js';
 
 /** What a fake engine answers: a page, or a thrown error. */
 export type Answer =
-	{status?: number; body: string; setCookie?: string[]} | {throw: unknown};
+	| {
+			status?: number;
+			body: string;
+			setCookie?: string[];
+			headers?: Record<string, string>;
+	  }
+	| {throw: unknown};
 
 export interface FakeRequest {
 	engine: string;
 	url: string;
 	/** The `cookie` header the transport would have sent. */
 	cookie?: string;
+	/** The request kind (selects the header table) and its referer. */
+	kind: RequestOptions['kind'];
+	referer?: string;
+	/** The fake transport's proxy: every request of one transport carries it. */
+	proxy?: string;
 }
 
 /** A declarative recipe for the fake engine `name`. */
@@ -55,6 +67,7 @@ export const pages = {
 /** A fake transport; `answers[engine]` decides each engine's reply. */
 export function fakeTransport(
 	answers: Record<string, (request: FakeRequest) => Answer>,
+	{proxy}: {proxy?: string} = {},
 ) {
 	const requests: FakeRequest[] = [];
 	const transport: Pick<Transport, 'session'> = {
@@ -63,15 +76,26 @@ export function fakeTransport(
 			return {
 				cookies: () => jar.list(),
 				clearCookies: () => jar.clear(),
-				async request(url: string): Promise<TransportResponse> {
+				async request(
+					url: string,
+					options: RequestOptions,
+				): Promise<TransportResponse> {
 					await Promise.resolve(); // answer asynchronously, like a real transport
+					options.signal?.throwIfAborted();
 					const target = new URL(url);
 					const name = target.hostname.replace(/\.test$/, '');
-					const request = {engine: name, url, cookie: jar.header(target)};
+					const request: FakeRequest = {
+						engine: name,
+						url,
+						cookie: jar.header(target),
+						kind: options.kind,
+						...(options.referer && {referer: options.referer}),
+						...(proxy && {proxy}),
+					};
 					requests.push(request);
 					const answer = answers[name]?.(request) ?? pages.broken();
 					if ('throw' in answer) throw answer.throw;
-					const headers = new Headers();
+					const headers = new Headers(answer.headers);
 					for (const c of answer.setCookie ?? [])
 						headers.append('set-cookie', c);
 					jar.store(target, answer.setCookie ?? []);
