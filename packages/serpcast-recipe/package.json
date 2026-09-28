@@ -29,12 +29,17 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"default": "./dist/index.js"
+		},
+		"./node": {
+			"types": "./dist/node.d.ts",
+			"default": "./dist/node.js"
 		}
 	},
 	"files": [
 		"dist"
 	],
 	"devDependencies": {
+		"@types/node": "^25.2.0",
 		"typescript": "^5.3.3",
 		"vitest": "^4.0.18"
 	},

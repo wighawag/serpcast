@@ -30,6 +30,9 @@ importers:
 
   packages/serpcast-recipe:
     devDependencies:
+      '@types/node':
+        specifier: ^25.2.0
+        version: 25.9.8
       typescript:
         specifier: ^5.3.3
         version: 5.9.3

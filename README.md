@@ -24,15 +24,18 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 
 ### `packages/serpcast-recipe` (shared recipe schema)
 
-| module | LOC | target |
-| ------ | --: | -----: |
+| module          | LOC | target |
+| --------------- | --: | -----: |
+| `src/recipe.ts` | 179 |    200 |
+| `src/node.ts`   |  41 |     60 |
+| `src/index.ts`  |  39 |     60 |
 
 ### `packages/serpcast` (library + CLI)
 
 | module | LOC | target |
 | ------ | --: | -----: |
 
-**Total own source: 0 LOC** (placeholders excluded, excluding deps).
+**Total own source: 259 LOC** (placeholders excluded, excluding deps).
 
 ## Develop
 
