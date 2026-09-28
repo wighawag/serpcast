@@ -95,7 +95,7 @@ So for strict mode the transport should: set `LIBCURL_IMPERSONATE_PATH` (highest
 
 ## Pinning curl_cffi's library
 
-No throwaway venv was needed: this host's nixpkgs `python3.14-curl-cffi-0.16.0` (`/nix/store/qgfj9khv…`) is dynamically linked to the exact same `curl-impersonate-2.1.1` store path given to impers, and both are in the running SearXNG closure (`nix-store -qR` of the `anon-search` start script). So the comparison is same file, same version, no difference to record. (A PyPI `curl_cffi` wheel bundles its own libcurl-impersonate and would not be pinned this way.)
+No throwaway venv was needed: this host's nixpkgs `python3.14-curl-cffi-0.16.0` (`/nix/store/qgfj9khv…`) is dynamically linked to the exact same `curl-impersonate-2.1.1` store path given to impers, and both are in the running SearXNG closure (`nix-store -qR` of a local SearXNG deployment's start script). So the comparison is same file, same version, no difference to record. (A PyPI `curl_cffi` wheel bundles its own libcurl-impersonate and would not be pinned this way.)
 
 ## How it was measured (spike code, deleted after recording)
 
