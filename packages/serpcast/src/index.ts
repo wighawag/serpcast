@@ -57,6 +57,7 @@ export {
 	type SearchcastModule,
 } from './browser.js';
 export {CookieStore, type StoredCookie} from './cookies.js';
+import {LIBCURL_IMPERSONATE} from './libcurl.js';
 export {
 	LIBCURL_IMPERSONATE,
 	dataDir,
@@ -88,13 +89,23 @@ export function usage(): string {
 		'  query --recipe <file> [--proxy <url>] [--libcurl <path>] <query...>',
 		'      Run one declarative recipe once. Prints {recipe, results} as JSON on',
 		'      stdout (exit 0), or "serpcast: <kind>: <message>" on stderr (exit 1).',
+		'  install-libcurl [--proxy <url>] [--force]',
+		`      Download libcurl-impersonate ${LIBCURL_IMPERSONATE.version} for this platform, verify its`,
+		'      pinned sha256 and install it in the data directory. Prints the',
+		'      installed path on stdout; never runs unless you type it.',
+		'  doctor [--libcurl <path>] [--proxy <url>] [--remote]',
+		'      Report which library is loaded, from where, and whether',
+		'      impersonation is active (exit 0) or not (exit 1). No network',
+		'      request unless --remote, which asks a fingerprint echo service.',
 		'',
 		'Options:',
 		'  --recipe <file>   The recipe JSON file',
 		'  --proxy <url>     Proxy for all traffic (http://, socks5://, socks5h://)',
 		'  --libcurl <path>  The libcurl-impersonate shared library',
+		'  --force           Replace a differing library already installed',
+		'  --remote          Check the fingerprint against an echo service',
 		'  -h, --help        Show this message',
 		'',
-		'Exit codes: 0 results (possibly empty), 1 a search failure, 2 a usage error.',
+		'Exit codes: 0 success, 1 a failure, 2 a usage error.',
 	].join('\n');
 }

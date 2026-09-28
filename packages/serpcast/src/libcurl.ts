@@ -1,9 +1,10 @@
 // Locating, loading and checking libcurl-impersonate. serpcast binds it
 // directly with koffi (ADR 0001 fallback; impers is NOT used, see
-// work/notes/findings/impers-fingerprint-vs-curl-cffi.md), so there is no
+// work/notes/findings/impers-fingerprint-vs-curl-cffi.md), so loading has no
 // download path at all: the library is only ever loaded from an explicit path
-// (ADR 0002). The library is loaded once per process, so its path is
-// process-global.
+// or the data directory (ADR 0002). The one thing that downloads it is the
+// user-invoked `serpcast install-libcurl` (src/install.ts). The library is
+// loaded once per process, so its path is process-global.
 //
 // Linux and FreeBSD load it with RTLD_DEEPBIND (koffi `deep`), so its calls to
 // nghttp2 and zlib bind to its own statically linked copies instead of Node's.
@@ -20,10 +21,15 @@ import {SerpcastError} from './errors.js';
 /**
  * The pinned libcurl-impersonate release and the sha256 of each platform's
  * release archive (lexiforest/curl-impersonate `libcurl-impersonate-*`
- * assets), keyed by `${process.platform}-${process.arch}`. CI and the install
- * command download from here and verify against these checksums. Checksums:
+ * assets), keyed by `${process.platform}-${process.arch}`. `serpcast
+ * install-libcurl` (src/install.ts; CI installs with it too) downloads from
+ * here and verifies against these checksums; nothing else downloads. Checksums:
  * the `digest` field of the GitHub release API for tag v2.1.1, cross-checked
- * by downloading the linux-x64 archive (2026-09-28).
+ * by downloading the linux-x64 archive (2026-09-28). Re-checked the same day
+ * for `serpcast install-libcurl`: every digest matches the API again, the
+ * linux-x64 download hashes to it, and `library` is a regular file (not a
+ * symlink) in the linux-x64, linux-arm64, darwin-x64, darwin-arm64 and
+ * win32-x64 archives.
  */
 export const LIBCURL_IMPERSONATE = {
 	version: '2.1.1',
@@ -80,6 +86,29 @@ export function libraryFileName(
 	return 'libcurl-impersonate.so';
 }
 
+/** Where a library path came from, in the order they are tried. */
+export type LibrarySource =
+	'option' | 'SERPCAST_LIBCURL_PATH' | 'LIBCURL_PATH' | 'data directory';
+
+/** `resolveLibraryPath`, also saying which setting named the path (for `doctor`). */
+export function locateLibrary(
+	option?: string,
+	env: NodeJS.ProcessEnv = process.env,
+): {path: string; source: LibrarySource} | undefined {
+	const explicit: [string | undefined, LibrarySource][] = [
+		[option, 'option'],
+		[env.SERPCAST_LIBCURL_PATH, 'SERPCAST_LIBCURL_PATH'],
+		[env.LIBCURL_PATH, 'LIBCURL_PATH'],
+	];
+	for (const [path, source] of explicit) {
+		if (path) return {path: resolve(path), source};
+	}
+	const installed = join(dataDir(env), libraryFileName());
+	return existsSync(installed)
+		? {path: installed, source: 'data directory'}
+		: undefined;
+}
+
 /**
  * Where the library is: the explicit option, then `SERPCAST_LIBCURL_PATH`,
  * then `LIBCURL_PATH`, then the data directory. Undefined when none of these
@@ -89,10 +118,7 @@ export function resolveLibraryPath(
 	option?: string,
 	env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-	const explicit = option || env.SERPCAST_LIBCURL_PATH || env.LIBCURL_PATH;
-	if (explicit) return resolve(explicit);
-	const installed = join(dataDir(env), libraryFileName());
-	return existsSync(installed) ? installed : undefined;
+	return locateLibrary(option, env)?.path;
 }
 
 const HOW_TO_FIX =

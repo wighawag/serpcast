@@ -9,7 +9,7 @@ Getting keyless web search results today usually means running SearXNG. What Sea
 - Engines are tried as an ordered **engine chain**, first answer wins, with searchcast (a real browser) as the fallback when HTTP is blocked.
 - serpcast is **not** an anonymity tool, and it is built so one can use it safely: the caller injects the proxy, the state store and the recipe set; serpcast makes no network call the caller did not cause and writes nothing to disk on its own ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)).
 
-Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner, code recipes and browser engines (searchcast), with `serpcast query` for recipe development.
+Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner, code recipes and browser engines (searchcast), with `serpcast query` for recipe development, `serpcast install-libcurl` to install the native library and `serpcast doctor` to check it.
 
 ## Packages
 
@@ -32,7 +32,7 @@ const api = await session.request('https://example.com/api?q=x', {kind: 'fetch',
 ```
 
 - **Proxy and DNS.** The proxy URL (`http://`, `socks5://`, `socks5h://`) is passed to libcurl as given, and its scheme decides where DNS is resolved: **`socks5h://` resolves host names at the proxy, `socks5://` resolves them locally**, on this host. Callers that want no local DNS must pass `socks5h://`. With no proxy, the connection is direct: libcurl's proxy environment variables (`http_proxy`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) are ignored, so the caller's option is the only egress policy.
-- **Finding the library.** In order: the `libcurlPath` option, `SERPCAST_LIBCURL_PATH`, `LIBCURL_PATH`, then `libcurl-impersonate.so` (`.dylib`, `.dll`) in serpcast's data directory (`$XDG_DATA_HOME/serpcast/`, default `~/.local/share/serpcast/`). Nothing else is searched and nothing is ever downloaded. The pinned release and its checksums are `LIBCURL_IMPERSONATE` (libcurl-impersonate 2.1.1). The library is loaded once per process, so its path is process-global: a second instance asking for a different path fails with an `impersonation` error.
+- **Finding the library.** In order: the `libcurlPath` option, `SERPCAST_LIBCURL_PATH`, `LIBCURL_PATH`, then `libcurl-impersonate.so` (`.dylib`, `.dll`) in serpcast's data directory (`$XDG_DATA_HOME/serpcast/`, default `~/.local/share/serpcast/`), where [`serpcast install-libcurl`](#installing-libcurl-impersonate) puts it. Nothing else is searched, and the library is never downloaded as a side effect: only that command, typed by you, downloads it. The pinned release and its checksums are `LIBCURL_IMPERSONATE` (libcurl-impersonate 2.1.1). The library is loaded once per process, so its path is process-global: a second instance asking for a different path fails with an `impersonation` error.
 - **Strict mode** (default on): the first request (or `transport.check()`, which makes no network call) verifies the loaded library exports `curl_easy_impersonate` and accepts `chrome146`; otherwise it fails with an `impersonation` error saying how to fix it, before any network call. `strict: false` lets a plain libcurl send requests (with a non-browser TLS fingerprint).
 - **Errors.** Every failure is a `SerpcastError` with a `kind`: network failures are `transport`, the time limit (`timeoutMs`, default 15 s) is `timeout`, and a missing or wrong library is `impersonation`. Aborting with the `signal` rejects with the signal's reason. The transport follows no redirects and does not interpret status codes; that is the caller's job.
 - **Platforms.** On Linux (and FreeBSD) the library is loaded with `RTLD_DEEPBIND`, so it uses its own nghttp2 and the HTTP/2 HEADERS frame carries Chrome's PRIORITY flag (asserted in the tests). macOS and Windows have no `RTLD_DEEPBIND`: TLS impersonation works there, but HTTP/2 fingerprint parity with Chrome is not claimed (unmeasured). Response bodies are decoded with Node's zlib, including zstd (Node 22.15 or later).
@@ -232,6 +232,43 @@ const engines = [
 
 A well-formed answer's results are normalized as for declarative recipes (`snippet` from `content`, `snippet` or `description`; other string fields pass through); an answer without a results array, or with a result lacking `title` or `url`, is a `transport` error. An endpoint that cannot be reached is `transport`, one that does not answer in time is `timeout`.
 
+## Installing libcurl-impersonate
+
+serpcast needs the libcurl-impersonate shared library and never fetches it on its own ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)). Two ways to provide it:
+
+**`serpcast install-libcurl`** downloads the pinned release, **libcurl-impersonate 2.1.1** ([lexiforest/curl-impersonate](https://github.com/lexiforest/curl-impersonate/releases/tag/v2.1.1)), for this platform, verifies its sha256 against the checksum pinned in serpcast's source (`LIBCURL_IMPERSONATE`), and installs the library as `libcurl-impersonate.so` (`.dylib`, `.dll`) in the data directory, where serpcast finds it with no further configuration:
+
+```sh
+serpcast install-libcurl [--proxy socks5h://127.0.0.1:9050] [--force]
+```
+
+- Pinned platforms: Linux x64 and arm64 (glibc), macOS x64 and arm64, Windows x64. Anywhere else (musl, FreeBSD), use your own build (below).
+- It prints what it downloads from, the verified checksum and where it put the library on stderr, and the installed path alone on stdout.
+- `--proxy` sends the download through your egress (`http://`, `socks5://`, `socks5h://`, as for the transport; `socks5h://` resolves host names at the proxy). Without it the connection is direct; proxy environment variables are ignored.
+- A checksum mismatch, a failed download or an archive without the library aborts with exit 1 and installs nothing (the data directory is not even created). The library is written to a temporary file and renamed into place, so an interrupted install never leaves a partial library.
+- If a library is already installed: an identical one is left alone (exit 0), a different one is kept and the command fails, unless `--force` replaces it.
+
+**Your own build** (Nix, a distro package, the one your SearXNG uses): point serpcast at it with `SERPCAST_LIBCURL_PATH=/path/to/libcurl-impersonate.so` (or `--libcurl`, or the `libcurlPath` option); nothing is downloaded. For example with Nix (nixpkgs' `curl-impersonate` is 2.1.1 at the time of writing): `SERPCAST_LIBCURL_PATH=$(nix build --no-link --print-out-paths nixpkgs#curl-impersonate.out)/lib/libcurl-impersonate.so`. It must be libcurl-impersonate 2.1.1 or later (it has to accept the `chrome146` target); strict mode refuses anything else.
+
+**`serpcast doctor`** reports which library serpcast would load, which setting named it, its version, and whether impersonation is active (exit 0) or not, and why (exit 1). It makes **no network request** unless you add `--remote`, which requests the fingerprint echo service `https://tls.browserleaks.com/json` once through the transport (and `--proxy`, if given) and prints the JA3, JA3N, JA4 and HTTP/2 (Akamai) values it saw. `--remote` is skipped when impersonation is not active.
+
+```sh
+$ serpcast doctor --remote
+library:       /home/me/.local/share/serpcast/libcurl-impersonate.so
+from:          the data directory (serpcast install-libcurl)
+version:       libcurl/8.21.0-IMPERSONATE BoringSSL zlib/1.3.1 brotli/1.2.0 zstd/1.5.7 ...
+pinned:        libcurl-impersonate 2.1.1
+impersonation: active (chrome146)
+echo:          https://tls.browserleaks.com/json
+ja3:           3b488a06a6c1b27f8195b594c8f1e98a
+ja3n:          8e19337e7524d2573be54efb2b0784c9
+ja4:           t13d1516h2_8daaf6152771_d8a2da3f94cd
+http2:         1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
+http2 hash:    52d84b11737d980aef856699f885ca86
+```
+
+Raw JA3 changes on every connection by design (Chrome permutes its TLS extensions); JA3N, JA4 and the HTTP/2 string are the stable values to compare.
+
 ## CLI: `serpcast query`
 
 For recipe development, `serpcast query` runs one declarative recipe once through the impersonated transport:
@@ -247,6 +284,8 @@ The words after the options are joined into one query. The library is found as d
 |       `0` | The recipe answered: `{"recipe": "<name>", "results": [{"title", "url", "snippet"?, ...}]}` as JSON on stdout. `results` is `[]` only on an `empty` match. |
 |       `1` | The search failed: `serpcast: <kind>: <message>` on stderr, where `<kind>` is the `SerpcastError` kind. An unreadable or invalid recipe file is `recipe`.  |
 |       `2` | A usage error (unknown command or option, missing `--recipe` or query): the message and the usage on stderr.                                                |
+
+`install-libcurl` and `doctor` use the same exit codes: `0` success, `1` a failed install (`serpcast: <message>` on stderr) or an unhealthy `doctor` report, `2` a usage error.
 
 ## Size discipline (per-module LOC)
 
@@ -265,22 +304,25 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 | module             | LOC | target |
 | ------------------ | --: | -----: |
 | `src/code.ts`        | 307 |    320 |
+| `src/download.ts`    | 290 |    300 |
 | `src/transport.ts`   | 280 |    300 |
+| `src/libcurl.ts`     | 272 |    280 |
 | `src/serpcast.ts`    | 243 |    260 |
-| `src/libcurl.ts`     | 246 |    260 |
 | `src/browser.ts`     | 233 |    250 |
 | `src/declarative.ts` | 200 |    220 |
+| `src/install.ts`     | 167 |    180 |
 | `src/cookies.ts`     | 155 |    170 |
 | `src/searchcast-endpoint.ts` | 154 |    170 |
+| `src/doctor.ts`      | 153 |    170 |
+| `src/cli.ts`         | 135 |    150 |
 | `src/html.ts`        | 126 |    150 |
 | `src/chrome.ts`      | 122 |    150 |
+| `src/index.ts`       | 111 |    120 |
 | `src/response.ts`    |  98 |    120 |
-| `src/cli.ts`         |  90 |    120 |
-| `src/index.ts`       | 100 |    110 |
 | `src/store.ts`       |  63 |     80 |
 | `src/errors.ts`      |  36 |     40 |
 
-**Total own source: 2453 LOC** (excluding deps).
+**Total own source: 3145 LOC** (excluding deps).
 
 ## Develop
 
@@ -293,7 +335,7 @@ pnpm test
 
 `pnpm format:check && pnpm build && pnpm test` is the verify gate (`dorfl.json`) and what CI runs on every push and pull request. Tests run against the built packages, so build before testing.
 
-The transport tests that need the native library run only when `SERPCAST_LIBCURL_PATH` points at a libcurl-impersonate shared library (and the plain-libcurl strict-mode tests only when `SERPCAST_TEST_PLAIN_LIBCURL` points at a plain libcurl); otherwise they are skipped with a message. CI fetches the pinned release named by `LIBCURL_IMPERSONATE`, verifies its checksum (`.github/scripts/fetch-libcurl.mjs`) and sets both, so they always run there.
+The transport tests that need the native library run only when `SERPCAST_LIBCURL_PATH` points at a libcurl-impersonate shared library (and the plain-libcurl strict-mode tests only when `SERPCAST_TEST_PLAIN_LIBCURL` points at a plain libcurl); otherwise they are skipped with a message. CI installs the pinned release with `serpcast install-libcurl` itself (into a temporary data directory, checksum verified) and sets both, so they always run there.
 
 ## License
 

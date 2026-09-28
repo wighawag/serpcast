@@ -30,14 +30,15 @@ jobs:
       - name: Format and build
         run: pnpm format:check && pnpm build
 
-      # The native transport tests need libcurl-impersonate: fetch the release
-      # pinned in LIBCURL_IMPERSONATE (packages/serpcast/src/libcurl.ts), verify
-      # its checksum, and point the tests at it. The plain-libcurl tests use the
-      # runner's system libcurl. Locally, without these variables, those tests
-      # are skipped with a message.
-      - name: Fetch pinned libcurl-impersonate
+      # The native transport tests need libcurl-impersonate: install the
+      # release pinned in LIBCURL_IMPERSONATE (packages/serpcast/src/libcurl.ts)
+      # with `serpcast install-libcurl` itself (which verifies its checksum),
+      # into a temporary data directory, and point the tests at it. The
+      # plain-libcurl tests use the runner's system libcurl. Locally, without
+      # these variables, those tests are skipped with a message.
+      - name: Install pinned libcurl-impersonate
         run: |
-          lib="$(node .github/scripts/fetch-libcurl.mjs "$RUNNER_TEMP/libcurl-impersonate")"
+          lib="$(XDG_DATA_HOME="$RUNNER_TEMP/xdg" node packages/serpcast/dist/cli.js install-libcurl)"
           echo "SERPCAST_LIBCURL_PATH=$lib" >> "$GITHUB_ENV"
           plain=/usr/lib/x86_64-linux-gnu/libcurl.so.4
           test -e "$plain"
