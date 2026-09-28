@@ -1,0 +1,55 @@
+{
+	"name": "serpcast",
+	"version": "0.0.0",
+	"description": "Keyless search engines over HTTP with a real browser's fingerprint (libcurl-impersonate), driven by recipes shared with searchcast, with an engine chain that falls back to a real browser.",
+	"license": "AGPL-3.0-only",
+	"keywords": [
+		"search",
+		"serp",
+		"scraping",
+		"recipe",
+		"libcurl-impersonate",
+		"fingerprint",
+		"searchcast",
+		"self-hosted"
+	],
+	"author": "wighawag",
+	"homepage": "https://github.com/wighawag/serpcast/tree/main/packages/serpcast#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/wighawag/serpcast.git",
+		"directory": "packages/serpcast"
+	},
+	"bugs": {
+		"url": "https://github.com/wighawag/serpcast/issues"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"type": "module",
+	"bin": {
+		"serpcast": "./dist/cli.js"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"dependencies": {
+		"serpcast-recipe": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^25.2.0",
+		"typescript": "^5.3.3",
+		"vitest": "^4.0.18"
+	},
+	"scripts": {
+		"build": "tsc",
+		"test": "vitest run",
+		"test:watch": "vitest"
+	}
+}

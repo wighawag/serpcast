@@ -32,3 +32,16 @@ Goal: scaffold the serpcast monorepo so later tasks only add code. Read `work/sp
 FIRST, check this task against current reality (it is a launch snapshot and may have drifted). If the repo already has a different structure, do not overwrite it; route the task to needs-attention with the discrepancy.
 
 RECORD non-obvious in-scope decisions (ADR if it meets `work/protocol/ADR-FORMAT.md`'s gate, otherwise a note linked from the done record).
+
+## Decisions
+
+None of these meets the ADR bar. The first is also explained in a comment in `tsconfig.base.json`.
+1. **Shared tsconfig and no source maps:** webveil has only per-package tsconfigs, so I added a root base file that each package extends. It turns off source and declaration maps because only `dist/` ships, unlike webveil, which also ships `src/`. The maps would point at files that aren't there. The alternative was shipping `src/` plus maps like webveil. This affects every later task's build output.
+2. **No copy script for README/LICENSE at publish time:** webveil has one (`copy-publish-assets.mjs`); I left it out. `pnpm pack` already includes the root AGPL `LICENSE` in the `serpcast` tarball, as the dry run showed. Shipping a README in each package is left to `release-workflow-oidc`.
+3. **pnpm version:** `packageManager` is pinned to `pnpm@11.25.0`, the local toolchain, rather than searchcast's `10.28.1`. `pnpm/action-setup@v5` in CI reads this field.
+4. **Prettier ignores:** `.prettierignore` copies webveil's, so `*.md`, `*.json` and `*.yaml` are not format-checked. That also keeps the work/ and protocol markdown out of the gate.
+5. **Tests run on built output:** the `serpcast` tests import `serpcast-recipe` and run `dist/cli.js`, so `pnpm test` needs `pnpm build` first. The verify gate and CI already run build before test, and the README's Develop section says so.
+6. **CLI stub behaviour:** with no arguments or `-h`/`--help` it prints usage and exits 0. Any other command prints an error and usage to stderr and exits 1. The `query` task will replace this.
+7. **webveil extras left out:** `ldenv`, the `preinstall` `npx only-allow pnpm` check (it makes a network call), the `prepare` build hook and an `engines` field.
+
+I did no git operations. The working tree has only the intended new files, plus the observation note.

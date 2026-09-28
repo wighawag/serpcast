@@ -1,0 +1,15 @@
+// Shared compiler options; each package extends this and sets its own rootDir,
+// outDir and include. No source or declaration maps: packages ship only dist/
+// (not src/, unlike webveil), so maps would point at files that are not there.
+{
+	"compilerOptions": {
+		"target": "ES2023",
+		"module": "NodeNext",
+		"lib": ["ES2023"],
+		"moduleResolution": "NodeNext",
+		"declaration": true,
+		"strict": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true
+	}
+}

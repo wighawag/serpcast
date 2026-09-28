@@ -1,0 +1,46 @@
+{
+	"name": "serpcast-recipe",
+	"version": "0.0.0",
+	"description": "The shared recipe schema, types and validator for serpcast (HTTP) and searchcast (browser). One recipe file describes a site for both runners.",
+	"license": "MIT",
+	"keywords": [
+		"search",
+		"recipe",
+		"schema",
+		"scraping",
+		"serpcast",
+		"searchcast"
+	],
+	"author": "wighawag",
+	"homepage": "https://github.com/wighawag/serpcast/tree/main/packages/serpcast-recipe#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/wighawag/serpcast.git",
+		"directory": "packages/serpcast-recipe"
+	},
+	"bugs": {
+		"url": "https://github.com/wighawag/serpcast/issues"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"devDependencies": {
+		"typescript": "^5.3.3",
+		"vitest": "^4.0.18"
+	},
+	"scripts": {
+		"build": "tsc",
+		"test": "vitest run",
+		"test:watch": "vitest"
+	}
+}
