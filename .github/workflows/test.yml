@@ -27,6 +27,22 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # The same gate as `verify` in dorfl.json.
-      - name: Format, build and test
-        run: pnpm format:check && pnpm build && pnpm test
+      - name: Format and build
+        run: pnpm format:check && pnpm build
+
+      # The native transport tests need libcurl-impersonate: fetch the release
+      # pinned in LIBCURL_IMPERSONATE (packages/serpcast/src/libcurl.ts), verify
+      # its checksum, and point the tests at it. The plain-libcurl tests use the
+      # runner's system libcurl. Locally, without these variables, those tests
+      # are skipped with a message.
+      - name: Fetch pinned libcurl-impersonate
+        run: |
+          lib="$(node .github/scripts/fetch-libcurl.mjs "$RUNNER_TEMP/libcurl-impersonate")"
+          echo "SERPCAST_LIBCURL_PATH=$lib" >> "$GITHUB_ENV"
+          plain=/usr/lib/x86_64-linux-gnu/libcurl.so.4
+          test -e "$plain"
+          echo "SERPCAST_TEST_PLAIN_LIBCURL=$plain" >> "$GITHUB_ENV"
+
+      # With the build above, the same gate as `verify` in dorfl.json.
+      - name: Test
+        run: pnpm test

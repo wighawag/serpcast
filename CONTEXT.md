@@ -33,7 +33,7 @@ _Avoid_: fan-out, metasearch
 ### Transport and fingerprint
 
 **Transport**:
-The HTTP client every engine request goes through: libcurl-impersonate (via `impers`) sending the pinned impersonation target with our header table, through the caller's proxy.
+The HTTP client every engine request goes through: libcurl-impersonate (through a direct koffi binding; `impers` was measured and not used, see the finding `impers-fingerprint-vs-curl-cffi`) sending the pinned impersonation target with our header table, through the caller's proxy.
 _Avoid_: fetcher, HTTP backend
 
 **Impersonation target**:
@@ -61,6 +61,10 @@ _Avoid_: cache, database
 **Session**:
 One engine's cookies and arbitrary JSON state, kept in the state store and dropped after an idle time or when cleared explicitly.
 _Avoid_: cookie jar, identity
+
+**Transport session**:
+The cookies that one engine's requests share, stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it. It is the cookie half of a Session, exported as plain JSON so the state store can keep it.
+_Avoid_: cookie jar, client
 
 **Cooldown**:
 The period during which an engine that answered `blocked` is skipped by the engine chain.

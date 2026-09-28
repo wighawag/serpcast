@@ -1,0 +1,3 @@
+# ADR 0001 still says "via impers"
+
+2026-09-28, noticed while building `impersonated-transport`: ADR 0001 (`docs/adr/0001-browser-fingerprint-via-libcurl-impersonate.md`, title, body and Consequences) says engine traffic goes through libcurl-impersonate "via `impers`" and that the library path is "set before `impers` loads". After the `fingerprint-spike` finding the owner chose the ADR's own fallback (a direct koffi binding loaded with `RTLD_DEEPBIND`), and that is what the code now does; impers is not a dependency. The ADR is accepted, so it was left as is: a human should decide whether to amend it or supersede it with a short ADR recording the switch (the fix is the deep-bind, not the binding). `CONTEXT.md`'s Transport entry was updated by the task.
