@@ -46,6 +46,14 @@
 		"koffi": "^3.3.2",
 		"serpcast-recipe": "workspace:*"
 	},
+	"peerDependencies": {
+		"searchcast": ">=0.1.1"
+	},
+	"peerDependenciesMeta": {
+		"searchcast": {
+			"optional": true
+		}
+	},
 	"devDependencies": {
 		"@types/node": "^25.2.0",
 		"typescript": "^5.3.3",

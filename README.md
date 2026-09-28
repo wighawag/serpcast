@@ -9,7 +9,7 @@ Getting keyless web search results today usually means running SearXNG. What Sea
 - Engines are tried as an ordered **engine chain**, first answer wins, with searchcast (a real browser) as the fallback when HTTP is blocked.
 - serpcast is **not** an anonymity tool, and it is built so one can use it safely: the caller injects the proxy, the state store and the recipe set; serpcast makes no network call the caller did not cause and writes nothing to disk on its own ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)).
 
-Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner and code recipes, with `serpcast query` for recipe development.
+Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner, code recipes and browser engines (searchcast), with `serpcast query` for recipe development.
 
 ## Packages
 
@@ -56,7 +56,7 @@ try {
 	else throw error;
 }
 await serpcast.clearSessions(); // or clearSessions('first'), by engine name
-await serpcast.close();
+await serpcast.close(); // stops a library-mode browser, if one was started
 ```
 
 `createSerpcast(options)` takes the transport options (`libcurlPath`, `proxy`, `strict`, `timeoutMs`, `caPath`, `maxBodyBytes`, see above) plus:
@@ -68,8 +68,9 @@ await serpcast.close();
 | `sessionIdleMs` | 10 minutes                         | An engine's session is dropped after this long without a search using it (`DEFAULT_SESSION_IDLE_MS`). |
 | `now`           | `Date.now`                         | The clock for cooldowns and sessions (and the default store).                                         |
 | `transport`     | created from the transport options | A transport to use instead (tests, or sharing one between instances).                                 |
+| `searchcast`    | none                               | How library-mode [browser engines](#browser-engines-searchcast) start searchcast.                     |
 
-`search(query, {engines, maxResults?, signal?})`: an engine is a declarative recipe or a [code recipe](#code-recipes), identified by its `name`; searchcast (browser) engines come next. `maxResults` cuts the answer (each recipe's `limit` still applies). How each outcome is handled:
+`search(query, {engines, maxResults?, signal?})`: an engine is a declarative recipe, a [code recipe](#code-recipes) or a [browser engine](#browser-engines-searchcast), identified by its `name`. `maxResults` cuts the answer (each recipe's `limit` still applies). How each outcome is handled:
 
 - **Results or an `empty` match**: returned as `{results, engine, failures}`. Later engines are not called.
 - **`blocked`, `recipe`, `timeout`, `transport`**: recorded in `failures` and the next engine is tried. `blocked` also starts the engine's **cooldown**: until it ends, the engine is skipped and listed in `failures` with a `blocked` error saying it is cooling down (so an all-skipped chain still says why).
@@ -173,6 +174,64 @@ The results are validated: an array of `{title, url, snippet?, ...}` with a non-
 
 serpcast ships no code recipe for a real site: write your own, for engines whose terms allow automated access.
 
+## Browser engines (searchcast)
+
+A browser engine runs a recipe in [searchcast](https://github.com/wighawag/searchcast), a real browser, so it has a real browser's fingerprint and runs the page's JavaScript. It is the heaviest engine, so it usually goes **last** in the chain, after the HTTP engines: it answers when they are blocked. It joins the chain like any engine (same failures and cooldowns); it has no serpcast session, since the browser keeps its own cookies in its profile. There are two modes.
+
+**Library mode**: serpcast runs searchcast in-process. `searchcast` is an optional peer dependency, imported only when a library-mode engine first runs (nothing else in serpcast imports it), so users of HTTP engines never install it or Chromium. Without it, the engine fails with a `transport` error saying `npm install searchcast`.
+
+```ts
+import {createSerpcast} from 'serpcast';
+import {loadRecipeFile} from 'serpcast-recipe/node';
+
+const serpcast = createSerpcast({
+	proxy: 'socks5h://127.0.0.1:9050', // the browser uses it too
+	searchcast: {xvfb: '/usr/bin/Xvfb'}, // or {headless: true}
+});
+const web = loadRecipeFile('./web.json');
+const {results, engine} = await serpcast.search('some query', {
+	engines: [web, {name: 'web-browser', searchcast: {recipe: web}}],
+});
+await serpcast.close(); // stops the browser
+```
+
+The browser is started lazily, on the first search that reaches a library-mode engine, and one browser serves every library-mode engine of the instance; `close()` stops it. The `searchcast` option (names follow searchcast's CLI flags):
+
+| option       | default                                                   | meaning                                                                          |
+| ------------ | --------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `chrome`     | searchcast's search (`$SEARCHCAST_CHROME`, then `PATH`)   | The Chromium or Chrome executable.                                               |
+| `xvfb`       | none                                                      | Run the browser headful on a private Xvfb display started from this executable. |
+| `headless`   | `false`                                                   | Run headless (easier for sites to tell apart from a person).                     |
+| `profile`    | a temporary directory                                     | The browser profile directory (cookies and history accumulate there).           |
+| `concurrency`| searchcast's (2 tabs)                                     | Maximum simultaneous tabs.                                                       |
+| `chromeArgs` | none                                                      | Extra Chromium arguments.                                                        |
+
+- **Proxy.** serpcast's `proxy` is the browser's proxy. Chromium does not accept `socks5h://` and resolves host names at any SOCKS5 proxy, so `socks5h://` is passed as `socks5://`, which keeps DNS at the proxy (checked with Chromium 151: the host name reaches the proxy, and `socks5h://` is not accepted at all). Note that a plain `socks5://` also resolves at the proxy in the browser, unlike the HTTP transport, where it resolves locally. With no proxy, the browser connects directly.
+- **Profile.** searchcast needs a profile directory. Without `profile`, serpcast creates a private temporary one (`serpcast-profile-*` in the OS temp directory, mode 0700) when the browser first starts, and deletes it on `close()` and, synchronously, when the process exits. This is the one disk write serpcast makes itself ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)). A process killed by a signal it does not handle runs no exit handler, so call `close()` on shutdown (for example on `SIGTERM`).
+- The search is bounded by the recipe's own `timeoutMs` inside searchcast; aborting `signal` rejects at once with its reason (the tab finishes in the background).
+
+**Endpoint mode**: serpcast calls a running `searchcast serve` over HTTP or its Unix socket (`GET /search?recipe=<recipe>&q=<query>`):
+
+```ts
+const engines = [
+	web,
+	{name: 'web-browser', searchcast: {endpoint: '/run/searchcast/searchcast.sock', recipe: 'web'}},
+	// or {endpoint: 'http://127.0.0.1:8931'}
+];
+```
+
+`endpoint` is an `http://` (or `https://`) URL or an absolute Unix socket path; `recipe` is the recipe's name on that server (default: the engine's `name`); `timeoutMs` bounds the whole request (default 30 s, twice a recipe's default, to leave room for a cold browser start). **In endpoint mode serpcast cannot control the browser's egress**: the searchcast service uses its own `--proxy`, and serpcast's `proxy` does not apply to it (nor to the request to the endpoint, which goes straight to it). The caller must configure the service's egress to match.
+
+**Errors.** searchcast answers both `blocked` and `recipe` with HTTP 502, so serpcast maps the answer's `error` field, not the status (in library mode, the thrown error's `code`):
+
+| searchcast `error`                                         | serpcast kind |
+| ---------------------------------------------------------- | ------------- |
+| `blocked`, `recipe`, `timeout`                             | the same      |
+| `input`, `unknown-recipe` (the engine is misconfigured)    | `recipe`      |
+| `browser`, `internal`, `method`, `not-found`, anything else, a body that is not JSON | `transport` |
+
+A well-formed answer's results are normalized as for declarative recipes (`snippet` from `content`, `snippet` or `description`; other string fields pass through); an answer without a results array, or with a result lacking `title` or `url`, is a `transport` error. An endpoint that cannot be reached is `transport`, one that does not answer in time is `timeout`.
+
 ## CLI: `serpcast query`
 
 For recipe development, `serpcast query` runs one declarative recipe once through the impersonated transport:
@@ -205,21 +264,23 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 
 | module             | LOC | target |
 | ------------------ | --: | -----: |
-| `src/code.ts`        | 304 |    320 |
+| `src/code.ts`        | 307 |    320 |
 | `src/transport.ts`   | 280 |    300 |
-| `src/serpcast.ts`    | 228 |    240 |
+| `src/serpcast.ts`    | 243 |    260 |
 | `src/libcurl.ts`     | 246 |    260 |
-| `src/declarative.ts` | 199 |    220 |
+| `src/browser.ts`     | 233 |    250 |
+| `src/declarative.ts` | 200 |    220 |
 | `src/cookies.ts`     | 155 |    170 |
+| `src/searchcast-endpoint.ts` | 154 |    170 |
 | `src/html.ts`        | 126 |    150 |
 | `src/chrome.ts`      | 122 |    150 |
 | `src/response.ts`    |  98 |    120 |
 | `src/cli.ts`         |  90 |    120 |
-| `src/index.ts`       |  92 |    100 |
+| `src/index.ts`       | 100 |    110 |
 | `src/store.ts`       |  63 |     80 |
 | `src/errors.ts`      |  36 |     40 |
 
-**Total own source: 2039 LOC** (excluding deps).
+**Total own source: 2453 LOC** (excluding deps).
 
 ## Develop
 

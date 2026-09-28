@@ -1,6 +1,7 @@
 // serpcast's library entry: the engine chain (`createSerpcast`), the state
-// store, the transport layer and the declarative and code recipe runners. The
-// browser engine arrives with its task (see work/tasks/).
+// store, the transport layer, the declarative and code recipe runners and
+// browser engines (searchcast). Nothing here imports `searchcast` itself: it
+// is loaded only when a library-mode browser engine runs.
 
 export {
 	SerpcastError,
@@ -48,6 +49,13 @@ export {
 	type HttpOptions,
 	type RunCodeRecipeOptions,
 } from './code.js';
+export {
+	chromiumProxy,
+	isBrowserEngine,
+	type BrowserEngine,
+	type SearchcastLibraryOptions,
+	type SearchcastModule,
+} from './browser.js';
 export {CookieStore, type StoredCookie} from './cookies.js';
 export {
 	LIBCURL_IMPERSONATE,

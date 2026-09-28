@@ -292,7 +292,10 @@ function validate(name: string, output: unknown): SearchResult[] {
  * attached to `promise` before anything else, so a rejection after the abort
  * is never unhandled.
  */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+export function untilAborted<T>(
+	promise: Promise<T>,
+	signal: AbortSignal,
+): Promise<T> {
 	return new Promise<T>((resolve, reject) => {
 		const onAbort = () => reject(signal.reason);
 		void promise.then(resolve, reject).finally(() => {

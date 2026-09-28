@@ -19,9 +19,18 @@
 // survive; concurrent searches on
 // one engine race and the last save wins. `serpcast/sessions` indexes the
 // engines with a session, so `clearSessions()` finds them in any store.
+// Browser engines (browser.ts) run in searchcast: they have no transport
+// session (the browser keeps its own cookies), and `close()` stops the
+// library-mode browser.
 // Decisions and alternatives: work/notes/observations/engine-chain-and-state-decisions.md.
 
 import type {Recipe} from 'serpcast-recipe';
+import {
+	createBrowserRunner,
+	isBrowserEngine,
+	type BrowserEngine,
+	type SearchcastLibraryOptions,
+} from './browser.js';
 import {isCodeRecipe, runCodeRecipe, type CodeRecipe} from './code.js';
 import type {StoredCookie} from './cookies.js';
 import {runDeclarativeRecipe, type SearchResult} from './declarative.js';
@@ -33,8 +42,8 @@ import {
 	type TransportOptions,
 } from './transport.js';
 
-/** One engine of a chain, identified by its name: a declarative or a code recipe. */
-export type Engine = Recipe | CodeRecipe;
+/** One engine of a chain, identified by its name: a declarative recipe, a code recipe or a browser engine. */
+export type Engine = Recipe | CodeRecipe | BrowserEngine;
 
 export interface SerpcastOptions extends TransportOptions {
 	/** Where sessions and cooldowns live. Default: in memory, per instance. */
@@ -47,6 +56,8 @@ export interface SerpcastOptions extends TransportOptions {
 	now?: () => number;
 	/** Use this transport instead of creating one from the transport options (tests, sharing). */
 	transport?: Pick<Transport, 'session'>;
+	/** How library-mode browser engines start searchcast (it gets `proxy` too). */
+	searchcast?: SearchcastLibraryOptions;
 }
 
 export interface SearchOptions {
@@ -95,6 +106,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	const transport = options.transport ?? createTransport(options);
 	const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
 	const idleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
+	const browser = createBrowserRunner(options);
 
 	async function coolingUntil(engine: string): Promise<number | undefined> {
 		const record = (await store.get(key(engine, 'cooldown'))) as
@@ -108,6 +120,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 		query: string,
 		{signal, maxResults}: Omit<SearchOptions, 'engines'>,
 	) {
+		if (isBrowserEngine(engine)) return browser.run(engine, query, signal);
 		const saved = (await store.get(key(engine.name, 'session'))) as
 			Partial<SessionRecord> | null | undefined;
 		const fresh =
@@ -221,8 +234,10 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 				);
 			}
 		},
-		// Nothing to release yet: HTTP engines hold no connection between
-		// requests. The browser engine (searchcast) will stop its browser here.
-		async close() {},
+		// HTTP engines hold no connection between requests; only a
+		// library-mode browser (and its temporary profile) is released.
+		async close() {
+			await browser.close();
+		},
 	};
 }

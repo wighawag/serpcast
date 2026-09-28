@@ -26,6 +26,9 @@ importers:
       koffi:
         specifier: ^3.3.2
         version: 3.3.2
+      searchcast:
+        specifier: '>=0.1.1'
+        version: 0.1.1
       serpcast-recipe:
         specifier: workspace:*
         version: link:../serpcast-recipe
@@ -493,6 +496,11 @@ packages:
   rolldown@1.2.11:
     resolution: {integrity: sha512-qpSwIyz0jHQq5qXBTNxFmE6664rJ7O+4TvPFOiOaBSrz8IOHc1koKKSqTM2H6u1UG1+TveuC6vaDHKXFOvb1Kw==}
     engines: {node: ^20.19.0 || >=22.12.0}
+    hasBin: true
+
+  searchcast@0.1.1:
+    resolution: {integrity: sha512-Y99+WRfl52UgojIt6t2PvlXEH8vNHg6u8IrnPk9vNxbzrqPlvB86NIo2QjDyPVo5T578j9DFcHUDnef47DvtBw==}
+    engines: {node: '>=22'}
     hasBin: true
 
   siginfo@2.0.0:
@@ -969,6 +977,8 @@ snapshots:
       '@rolldown/binding-openharmony-arm64': 1.2.11
       '@rolldown/binding-win32-arm64-msvc': 1.2.11
       '@rolldown/binding-win32-x64-msvc': 1.2.11
+
+  searchcast@0.1.1: {}
 
   siginfo@2.0.0: {}
 

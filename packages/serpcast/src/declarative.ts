@@ -152,7 +152,7 @@ function decide(recipe: Recipe, response: TransportResponse): SearchResult[] {
 				const value = page.read(item, field);
 				if (value !== undefined) row[key] = value;
 			}
-			if (row.title && row.url) results.push(normalize(row));
+			if (row.title && row.url) results.push(normalizeResult(row));
 			if (results.length >= limit) break;
 		}
 		if (results.length > 0) return results;
@@ -168,7 +168,8 @@ function decide(recipe: Recipe, response: TransportResponse): SearchResult[] {
 	);
 }
 
-function normalize(row: Record<string, string>): SearchResult {
+/** A row of recipe fields as a result: `snippet` from the first of `content`, `snippet`, `description`. */
+export function normalizeResult(row: Record<string, string>): SearchResult {
 	const snippet = SNIPPET_FIELDS.map((key) => row[key]).find(Boolean);
 	const {title, url, ...extra} = row;
 	return {title: title!, url: url!, ...extra, ...(snippet && {snippet})};
