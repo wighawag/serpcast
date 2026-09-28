@@ -1,8 +1,28 @@
-// serpcast's library entry: the transport layer and the declarative recipe
-// runner. The engine chain and code recipes arrive with their tasks (see
-// work/tasks/).
+// serpcast's library entry: the engine chain (`createSerpcast`), the state
+// store, the transport layer and the declarative recipe runner. Code recipes
+// and the browser engine arrive with their tasks (see work/tasks/).
 
-export {SerpcastError, type SerpcastErrorKind} from './errors.js';
+export {
+	SerpcastError,
+	type EngineFailure,
+	type SerpcastErrorKind,
+} from './errors.js';
+export {
+	DEFAULT_COOLDOWN_MS,
+	DEFAULT_SESSION_IDLE_MS,
+	createSerpcast,
+	type Engine,
+	type SearchOptions,
+	type SearchResponse,
+	type Serpcast,
+	type SerpcastOptions,
+} from './serpcast.js';
+export {
+	createMemoryStore,
+	type JsonValue,
+	type MemoryStoreOptions,
+	type StateStore,
+} from './store.js';
 export {
 	CHROME_MAJOR,
 	IMPERSONATE_TARGET,

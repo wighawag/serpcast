@@ -9,7 +9,7 @@ Getting keyless web search results today usually means running SearXNG. What Sea
 - Engines are tried as an ordered **engine chain**, first answer wins, with searchcast (a real browser) as the fallback when HTTP is blocked.
 - serpcast is **not** an anonymity tool, and it is built so one can use it safely: the caller injects the proxy, the state store and the recipe set; serpcast makes no network call the caller did not cause and writes nothing to disk on its own ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)).
 
-Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the transport and the declarative recipe runner, with `serpcast query` for recipe development.
+Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport and the declarative recipe runner, with `serpcast query` for recipe development.
 
 ## Packages
 
@@ -36,6 +36,64 @@ const api = await session.request('https://example.com/api?q=x', {kind: 'fetch',
 - **Strict mode** (default on): the first request (or `transport.check()`, which makes no network call) verifies the loaded library exports `curl_easy_impersonate` and accepts `chrome146`; otherwise it fails with an `impersonation` error saying how to fix it, before any network call. `strict: false` lets a plain libcurl send requests (with a non-browser TLS fingerprint).
 - **Errors.** Every failure is a `SerpcastError` with a `kind`: network failures are `transport`, the time limit (`timeoutMs`, default 15 s) is `timeout`, and a missing or wrong library is `impersonation`. Aborting with the `signal` rejects with the signal's reason. The transport follows no redirects and does not interpret status codes; that is the caller's job.
 - **Platforms.** On Linux (and FreeBSD) the library is loaded with `RTLD_DEEPBIND`, so it uses its own nghttp2 and the HTTP/2 HEADERS frame carries Chrome's PRIORITY flag (asserted in the tests). macOS and Windows have no `RTLD_DEEPBIND`: TLS impersonation works there, but HTTP/2 fingerprint parity with Chrome is not claimed (unmeasured). Response bodies are decoded with Node's zlib, including zstd (Node 22.15 or later).
+
+## Engine chain (`createSerpcast`)
+
+The library's main entry. A search tries an ordered list of engines and stops at the **first answer** (results, or an `empty` match), so a query costs as few requests as possible: engines gate on request volume per exit IP, and querying every engine per search (SearXNG's fan-out) spends that budget. There is no merging or ranking across engines.
+
+```ts
+import {createSerpcast, SerpcastError} from 'serpcast';
+import {loadRecipeFile} from 'serpcast-recipe/node';
+
+const serpcast = createSerpcast({proxy: 'socks5h://127.0.0.1:9050'});
+const engines = [loadRecipeFile('./first.json'), loadRecipeFile('./second.json')];
+try {
+	const {results, engine, failures} = await serpcast.search('some query', {engines, maxResults: 10});
+	// results: [{title, url, snippet?, ...}], engine: the name of the recipe that answered,
+	// failures: [{engine, error}] for each engine tried before it
+} catch (error) {
+	if (error instanceof SerpcastError && error.kind === 'exhausted') console.log(error.failures);
+	else throw error;
+}
+await serpcast.clearSessions(); // or clearSessions('first'), by engine name
+await serpcast.close();
+```
+
+`createSerpcast(options)` takes the transport options (`libcurlPath`, `proxy`, `strict`, `timeoutMs`, `caPath`, `maxBodyBytes`, see above) plus:
+
+| option          | default                            | meaning                                                                                               |
+| --------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `store`         | in memory                          | The state store for sessions and cooldowns (below).                                                   |
+| `cooldownMs`    | 5 minutes                          | How long an engine that answered `blocked` is skipped (`DEFAULT_COOLDOWN_MS`).                        |
+| `sessionIdleMs` | 10 minutes                         | An engine's session is dropped after this long without a search using it (`DEFAULT_SESSION_IDLE_MS`). |
+| `now`           | `Date.now`                         | The clock for cooldowns and sessions (and the default store).                                         |
+| `transport`     | created from the transport options | A transport to use instead (tests, or sharing one between instances).                                 |
+
+`search(query, {engines, maxResults?, signal?})`: an engine is, for now, a declarative recipe, identified by its `name`; code recipes and searchcast (browser) engines come next. `maxResults` cuts the answer (each recipe's `limit` still applies). How each outcome is handled:
+
+- **Results or an `empty` match**: returned as `{results, engine, failures}`. Later engines are not called.
+- **`blocked`, `recipe`, `timeout`, `transport`**: recorded in `failures` and the next engine is tried. `blocked` also starts the engine's **cooldown**: until it ends, the engine is skipped and listed in `failures` with a `blocked` error saying it is cooling down (so an all-skipped chain still says why).
+- **Every engine failed**: the search throws a `SerpcastError` of kind `exhausted`, whose `failures` lists every `{engine, error}` in order. It never answers `[]` for that. An empty `engines` list is `exhausted` too.
+- **`impersonation`** is not an engine failure: it means every HTTP engine would search with the wrong fingerprint, so the search is aborted at once with that error (no later engine is tried, including a browser engine). Check `error.kind === 'impersonation'`.
+- **Aborting `signal`** rejects with the signal's reason; it is not an engine failure.
+
+### State store
+
+Cooldowns and sessions live in a **state store** the caller injects, because where state lives and how it is partitioned (per identity, per process, on disk or not) is a privacy decision ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)). The default, `createMemoryStore()`, keeps them in a Map in this instance and writes nothing to disk; serpcast ships no file store. A store is a small async key/value interface with per-key expiry, holding plain JSON:
+
+```ts
+import type {JsonValue, StateStore} from 'serpcast';
+
+interface StateStore {
+	get(key: string): Promise<JsonValue | undefined>; // undefined when absent or expired
+	set(key: string, value: JsonValue, options?: {ttlMs?: number}): Promise<void>;
+	delete(key: string): Promise<void>;
+}
+```
+
+serpcast namespaces its keys per engine name: `engine/<name>/session` (the engine's cookies and last use) and `engine/<name>/cooldown` (when it ends), with `<name>` URL-encoded, plus `serpcast/sessions`, the list of engines with a session (so `clearSessions()` finds them in any store). Every value carries the time serpcast relies on and is checked with serpcast's clock, and every `set` passes a `ttlMs` so the store can drop it; a store that expires late is still correct. Give each identity its own store (or key prefix) to keep their sessions apart.
+
+**Sessions.** Each engine gets a transport session whose cookies are loaded from the store before the engine runs and saved after, whatever the outcome (a challenge page may set the cookie that lets the next attempt through). A session unused for `sessionIdleMs` is dropped, and `clearSessions(engine?)` drops one engine's session or all of them. Two concurrent searches on the same engine each save their own cookies; the last save wins.
 
 ## Declarative recipes over HTTP
 
@@ -103,6 +161,7 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 | module             | LOC | target |
 | ------------------ | --: | -----: |
 | `src/transport.ts`   | 280 |    300 |
+| `src/serpcast.ts`    | 210 |    240 |
 | `src/libcurl.ts`     | 246 |    260 |
 | `src/declarative.ts` | 199 |    220 |
 | `src/cookies.ts`     | 155 |    170 |
@@ -110,10 +169,11 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 | `src/chrome.ts`      | 122 |    150 |
 | `src/response.ts`    |  98 |    120 |
 | `src/cli.ts`         |  90 |    120 |
-| `src/index.ts`       |  61 |     80 |
-| `src/errors.ts`      |  26 |     40 |
+| `src/index.ts`       |  81 |    100 |
+| `src/store.ts`       |  63 |     80 |
+| `src/errors.ts`      |  36 |     40 |
 
-**Total own source: 1403 LOC** (excluding deps).
+**Total own source: 1706 LOC** (excluding deps).
 
 ## Develop
 
