@@ -1,5 +1,12 @@
 # serpcast
 
+## 0.5.0
+
+### Minor Changes
+
+- 0c7da69: `serpcast install-recipes <url|path> --sha256 <hex> [--name <set>] [--dir <path>] [--proxy <url>] [--force]` installs a set of recipes from a `.tar.gz` release archive, only when typed. `--sha256` is required for URLs and files alike (recipes are code: the pin is the trust decision) and is checked before anything is unpacked. URLs are downloaded with `install-libcurl`'s downloader (`--proxy` only, proxy environment ignored). The archive may hold only regular `*.mjs`, `*.js` and `*.json` files, at its root or under one top-level directory, with an optional `manifest.json` `{name, version}`; anything else fails the install, which then writes nothing. The set is installed atomically into `$XDG_DATA_HOME/serpcast/recipes/<set>/` with a `.source.json` recording its origin; a differing set is replaced only with `--force`. `serpcast recipes list` shows the installed sets, and the new export `recipesDir(env?)` returns their base directory.
+- 0beb4bb: Code recipes can set a cookie the way a site's page script does: `ctx.cookies.set(url, cookie)` applies a `document.cookie` string (`name=value; Path=/; Secure; Max-Age=...; Domain=...`) as the page at `url` would (the store's `Set-Cookie` rules, `HttpOnly` ignored, never replacing an `HttpOnly` cookie; returns `false` when rejected). The cookie lives in the engine's transport session, so it is sent where Chrome puts it by every matching request, and kept and dropped with the session. `ctx.cookies.get(url)` reads what `document.cookie` would (non-`HttpOnly` cookies sent to `url`) and `ctx.cookies.delete(url, name)` removes them by name. Cookie names such as `a#b` are kept byte for byte. Transport sessions gain `documentCookies` (exported with the `documentCookies(jar)` helper and the `DocumentCookies` type); on an injected `ChainTransport` it is optional, and without it `ctx.cookies` is a `recipe` error.
+
 ## 0.4.0
 
 ### Minor Changes
