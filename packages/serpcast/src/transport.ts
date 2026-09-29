@@ -11,6 +11,13 @@
 // HTTPS_PROXY, ALL_PROXY, NO_PROXY) can neither add nor bypass a proxy: the
 // caller's option is the only egress policy (ADR 0002). Only http and https
 // are allowed.
+//
+// Threads: every libcurl call, and so every write/header callback, runs on the
+// main thread. A request is one easy handle in its own multi handle, driven by
+// `drive` from event-loop timers; nothing stays in native code between turns.
+// `curl_easy_perform` on a worker thread (koffi `.async`) deadlocked
+// `process.exit()`: the worker waited for the main thread to run its JS
+// callbacks while exit waited for the worker.
 
 import {DEFAULT_TIMEOUT_MS} from 'serpcast-recipe';
 import {headerTable, IMPERSONATE_TARGET, type RequestKind} from './chrome.js';
@@ -81,18 +88,29 @@ const OPT = {
 	ERRORBUFFER: 10010,
 	WRITEFUNCTION: 20011,
 	HTTPHEADER: 10023,
-	NOPROGRESS: 43,
 	CAINFO: 10065,
 	HEADERFUNCTION: 20079,
 	NOSIGNAL: 99,
 	TIMEOUT_MS: 155,
 	NOPROXY: 10177,
-	XFERINFOFUNCTION: 20219,
 	PROTOCOLS_STR: 10318,
+	QUICK_EXIT: 322,
 };
 const E_WRITE = 23;
 const E_TIMEDOUT = 28;
-const E_ABORTED = 42;
+const CURLMSG_DONE = 1;
+
+/**
+ * How long an in-flight request waits between two looks at its sockets when
+ * they had nothing to read or write (sooner when libcurl asks for it). While
+ * data flows, it looks again on the next event-loop turn. Each look is one
+ * non-blocking `curl_multi_perform` plus one `curl_multi_poll` with a zero
+ * timeout. Measured on Linux x64 (Node 24, 2026-09-29) with a server that
+ * never answers: one idle in-flight request costs about 0.6% of one core, ten
+ * about 1%. It adds at most 5 ms of latency to a network event that arrives
+ * while idle.
+ */
+const IDLE_POLL_MS = 5;
 
 export function createTransport(options: TransportOptions = {}): Transport {
 	const strict = options.strict ?? true;
@@ -164,7 +182,7 @@ function parseUrl(url: string): URL {
 	return parsed;
 }
 
-let protos: {data: unknown; progress: unknown} | undefined;
+let proto: unknown;
 
 async function perform(
 	curl: Libcurl,
@@ -175,18 +193,11 @@ async function perform(
 	request: RequestOptions,
 ): Promise<TransportResponse> {
 	const {koffi} = curl;
-	protos ??= {
-		data: koffi.pointer(
-			koffi.proto(
-				'size_t serpcast_data_cb(void *ptr, size_t size, size_t n, void *user)',
-			),
+	proto ??= koffi.pointer(
+		koffi.proto(
+			'size_t serpcast_data_cb(void *ptr, size_t size, size_t n, void *user)',
 		),
-		progress: koffi.pointer(
-			koffi.proto(
-				'int serpcast_progress_cb(void *user, int64_t dt, int64_t dn, int64_t ut, int64_t un)',
-			),
-		),
-	};
+	);
 	const max = options.maxBodyBytes ?? 16 * 1024 * 1024;
 	const chunks: Buffer[] = [];
 	let size = 0;
@@ -197,7 +208,7 @@ async function perform(
 		if (size > max) return ((tooLarge = true), 0);
 		chunks.push(Buffer.from(new Uint8Array(koffi.view(ptr, n * m)))); // copy
 		return n * m;
-	}, protos.data as never);
+	}, proto as never);
 	const onHeader = koffi.register((ptr: unknown, n: number, m: number) => {
 		const line = Buffer.from(new Uint8Array(koffi.view(ptr, n * m))).toString(
 			'latin1',
@@ -205,11 +216,7 @@ async function perform(
 		if (/^HTTP\/\S+ \d{3}/.test(line)) headerLines = [];
 		headerLines.push(line.replace(/\r?\n$/, ''));
 		return n * m;
-	}, protos.data as never);
-	const onProgress = koffi.register(
-		() => (request.signal?.aborted ? 1 : 0),
-		protos.progress as never,
-	);
+	}, proto as never);
 	const errbuf = koffi.alloc('char', 256);
 	const handle = curl.init();
 	let list: unknown = null;
@@ -231,6 +238,9 @@ async function perform(
 		set(OPT.NOPROXY, 'str', '');
 		set(OPT.PROTOCOLS_STR, 'str', 'http,https');
 		set(OPT.NOSIGNAL, 'long', 1);
+		// Do not wait for a pending DNS lookup when an aborted or timed-out
+		// request is cleaned up: that wait would now block the main thread.
+		set(OPT.QUICK_EXIT, 'long', 1);
 		set(
 			OPT.TIMEOUT_MS,
 			'long',
@@ -238,23 +248,9 @@ async function perform(
 		);
 		if (options.caPath) set(OPT.CAINFO, 'str', options.caPath);
 		set(OPT.ERRORBUFFER, 'void *', errbuf);
-		set(OPT.WRITEFUNCTION, protos.data, onData);
-		set(OPT.HEADERFUNCTION, protos.data, onHeader);
-		set(OPT.NOPROGRESS, 'long', 0);
-		set(OPT.XFERINFOFUNCTION, protos.progress, onProgress);
-		const code = await new Promise<number>((resolve, reject) =>
-			curl.perform.async(handle, (cause: unknown, res: number) =>
-				cause
-					? reject(
-							new SerpcastError('transport', `request to ${url} failed`, {
-								cause,
-							}),
-						)
-					: resolve(res),
-			),
-		);
-		if (code === E_ABORTED && request.signal?.aborted)
-			throw request.signal.reason;
+		set(OPT.WRITEFUNCTION, proto, onData);
+		set(OPT.HEADERFUNCTION, proto, onHeader);
+		const code = await drive(curl, handle, url, request.signal);
 		if (code === E_TIMEDOUT)
 			throw new SerpcastError('timeout', `request to ${url} timed out`);
 		if (code === E_WRITE && tooLarge) {
@@ -275,6 +271,110 @@ async function perform(
 		if (handle) curl.cleanup(handle);
 		if (list) curl.slistFree(list);
 		koffi.free(errbuf);
-		for (const cb of [onData, onHeader, onProgress]) koffi.unregister(cb);
+		for (const cb of [onData, onHeader]) koffi.unregister(cb);
 	}
+}
+
+/**
+ * Run one easy handle to completion in its own multi handle, from the main
+ * thread: the transfer's libcurl result code, or the signal's reason once it
+ * aborts (the handle is then dropped at once, whatever it was doing). The
+ * multi handle is removed before this settles, so the caller may clean the
+ * easy handle up.
+ */
+function drive(
+	curl: Libcurl,
+	easy: unknown,
+	url: string,
+	signal: AbortSignal | undefined,
+): Promise<number> {
+	return new Promise<number>((resolve, reject) => {
+		const multiError = (call: string, code: number) =>
+			new SerpcastError(
+				'transport',
+				`request to ${url} failed: ${call}: ${curl.multiStrerror(code)} (curlm ${code})`,
+			);
+		const multi = curl.multiInit();
+		if (!multi) {
+			reject(new SerpcastError('transport', 'curl_multi_init failed'));
+			return;
+		}
+		const added: number = curl.multiAdd(multi, easy);
+		if (added !== 0) {
+			curl.multiCleanup(multi);
+			reject(multiError('curl_multi_add_handle', added));
+			return;
+		}
+		let timer: NodeJS.Timeout | undefined;
+		let immediate: NodeJS.Immediate | undefined;
+		let settled = false;
+		const cancel = () => {
+			if (timer) clearTimeout(timer);
+			if (immediate) clearImmediate(immediate);
+			timer = immediate = undefined;
+		};
+		const schedule = (ms: number) => {
+			cancel();
+			if (ms <= 0) immediate = setImmediate(tick);
+			else timer = setTimeout(tick, ms);
+		};
+		const settle = (done: () => void) => {
+			settled = true;
+			cancel();
+			signal?.removeEventListener('abort', onAbort);
+			curl.multiRemove(multi, easy);
+			curl.multiCleanup(multi);
+			done();
+		};
+		const onAbort = () => schedule(0);
+		function tick() {
+			timer = immediate = undefined;
+			if (settled) return;
+			try {
+				step();
+			} catch (error) {
+				if (!settled) settle(() => reject(error));
+			}
+		}
+		function step() {
+			if (signal?.aborted) {
+				settle(() => reject(signal.reason));
+				return;
+			}
+			const running = [0];
+			const performed: number = curl.multiPerform(multi, running);
+			if (performed !== 0) {
+				settle(() => reject(multiError('curl_multi_perform', performed)));
+				return;
+			}
+			const queued = [0];
+			for (;;) {
+				const pointer = curl.multiInfoRead(multi, queued);
+				if (!pointer) break;
+				const message = curl.koffi.decode(
+					pointer,
+					curl.multiMessage as never,
+				) as {msg: number; data: {result: number}};
+				if (message.msg === CURLMSG_DONE) {
+					const result = message.data.result;
+					settle(() => resolve(result));
+					return;
+				}
+			}
+			// Nothing finished: look again now if a socket is ready or libcurl
+			// wants to run at once, else after its own timeout, at most IDLE_POLL_MS.
+			const ready = [0];
+			const polled: number = curl.multiPoll(multi, null, 0, 0, ready);
+			if (polled !== 0) {
+				settle(() => reject(multiError('curl_multi_poll', polled)));
+				return;
+			}
+			const wait = [0];
+			curl.multiTimeout(multi, wait);
+			const due = wait[0]! < 0 ? IDLE_POLL_MS : wait[0]!;
+			schedule(ready[0]! > 0 ? 0 : Math.min(due, IDLE_POLL_MS));
+		}
+		signal?.addEventListener('abort', onAbort, {once: true});
+		tick();
+	});
 }

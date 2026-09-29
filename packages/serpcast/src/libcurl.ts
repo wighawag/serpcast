@@ -124,9 +124,14 @@ export function resolveLibraryPath(
 const HOW_TO_FIX =
 	'Install it with `serpcast install-libcurl`, or set SERPCAST_LIBCURL_PATH (or the libcurlPath option) to a libcurl-impersonate shared library.';
 
-type Fn = ((...args: any[]) => any) & {async: (...args: any[]) => void};
+type Fn = (...args: any[]) => any;
 
-/** The loaded library and the functions serpcast calls. */
+/**
+ * The loaded library and the functions serpcast calls. Every call is
+ * synchronous, on the main thread: requests are driven through the multi
+ * interface (see `drive` in transport.ts), never with `curl_easy_perform` on a
+ * worker thread, whose JS callbacks deadlocked `process.exit()`.
+ */
 export interface Libcurl {
 	path: string;
 	koffi: typeof import('koffi').default;
@@ -134,8 +139,22 @@ export interface Libcurl {
 	init: Fn;
 	cleanup: Fn;
 	setopt: Fn;
-	perform: Fn;
 	strerror: Fn;
+	multiInit: Fn;
+	multiCleanup: Fn;
+	multiAdd: Fn;
+	multiRemove: Fn;
+	/** `curl_multi_perform(multi, [running])`. */
+	multiPerform: Fn;
+	/** `curl_multi_poll(multi, null, 0, timeoutMs, [numfds])`. */
+	multiPoll: Fn;
+	/** `curl_multi_timeout(multi, [ms])`. */
+	multiTimeout: Fn;
+	/** `curl_multi_info_read(multi, [queued])`: a pointer to decode as `multiMessage`, or null. */
+	multiInfoRead: Fn;
+	/** The `CURLMsg` struct type. */
+	multiMessage: unknown;
+	multiStrerror: Fn;
 	slistAppend: Fn;
 	slistFree: Fn;
 	/** Undefined when the symbol is missing (plain libcurl). */
@@ -210,8 +229,27 @@ async function bind(real: string): Promise<Libcurl> {
 			init: f('void *curl_easy_init()'),
 			cleanup: f('void curl_easy_cleanup(void *curl)'),
 			setopt: f('int curl_easy_setopt(void *curl, int option, ...)'),
-			perform: f('int curl_easy_perform(void *curl)'),
 			strerror: f('const char *curl_easy_strerror(int code)'),
+			multiInit: f('void *curl_multi_init()'),
+			multiCleanup: f('int curl_multi_cleanup(void *multi)'),
+			multiAdd: f('int curl_multi_add_handle(void *multi, void *curl)'),
+			multiRemove: f('int curl_multi_remove_handle(void *multi, void *curl)'),
+			multiPerform: f(
+				'int curl_multi_perform(void *multi, _Out_ int *running)',
+			),
+			multiPoll: f(
+				'int curl_multi_poll(void *multi, void *extra, unsigned int n, int timeout, _Out_ int *numfds)',
+			),
+			multiTimeout: f('int curl_multi_timeout(void *multi, _Out_ long *ms)'),
+			multiInfoRead: f(
+				'void *curl_multi_info_read(void *multi, _Out_ int *queued)',
+			),
+			multiMessage: koffi.struct({
+				msg: 'int',
+				easy: 'void *',
+				data: koffi.union({whatever: 'void *', result: 'int'}),
+			}),
+			multiStrerror: f('const char *curl_multi_strerror(int code)'),
 			slistAppend: f('void *curl_slist_append(void *list, const char *value)'),
 			slistFree: f('void curl_slist_free_all(void *list)'),
 			impersonate,
@@ -226,12 +264,15 @@ async function bind(real: string): Promise<Libcurl> {
 }
 
 /**
- * Keep the library mapped until the process ends. Requests run on libuv worker
- * threads; BoringSSL leaves thread-local destructors on them, which run when
- * the workers exit at process exit, after koffi has already unloaded the
- * library: a SIGSEGV on every exit (measured on Linux). Re-opening it with
- * RTLD_NOLOAD | RTLD_NODELETE (the handle is deliberately leaked) prevents the
- * unload. Best effort, POSIX only; Windows is unmeasured.
+ * Keep the library mapped until the process ends. Requests used to run on
+ * libuv worker threads; BoringSSL left thread-local destructors on them, which
+ * ran when the workers exited at process exit, after koffi had already
+ * unloaded the library: a SIGSEGV on every exit (measured on Linux). Requests
+ * now run on the main thread (transport.ts); the pin is kept anyway (ADR
+ * 0004; the library still starts threads of its own for DNS, and exit without
+ * the pin has not been re-measured). Re-opening it
+ * with RTLD_NOLOAD | RTLD_NODELETE (the handle is deliberately leaked)
+ * prevents the unload. Best effort, POSIX only; Windows is unmeasured.
  */
 function pin(koffi: Libcurl['koffi'], path: string): void {
 	const flags = {linux: 0x1006, freebsd: 0x3002, darwin: 0x92} as Partial<
