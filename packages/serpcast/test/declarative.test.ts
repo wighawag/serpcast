@@ -2,9 +2,14 @@
 // through a fake transport session (Node's HTTP client), so these tests need
 // no native library. declarative-native.test.ts runs through the real one.
 
-import {afterAll, beforeAll, describe, expect, it} from 'vitest';
+import {afterAll, afterEach, beforeAll, describe, expect, it, vi} from 'vitest';
 import {parseRecipe} from 'serpcast-recipe';
-import {runDeclarativeRecipe, SerpcastError} from '../src/index.js';
+import {
+	runDeclarativeRecipe,
+	SerpcastError,
+	type RequestOptions,
+	type TransportResponse,
+} from '../src/index.js';
 import {
 	fakeSession,
 	item,
@@ -278,5 +283,95 @@ describe('runDeclarativeRecipe: failures', () => {
 			}),
 		).rejects.toBe(reason);
 		expect(session.requests).toEqual([]);
+	});
+});
+
+// An abort (the caller's, or the recipe's own timeout) landing between two
+// redirect hops: the next request() is handed an already aborted signal and
+// rejects, as the real transport does (signal.throwIfAborted()). That
+// rejection must be handled, or it crashes the process.
+describe('aborting between redirect hops', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/**
+	 * A session whose first answer is a redirect; reading its `location` header
+	 * (the runner does so right after the hop, before the next request) calls
+	 * `between`. Every request rejects when given an aborted signal.
+	 */
+	const redirectingSession = (between: () => void) => {
+		const requests: string[] = [];
+		const session = {
+			requests,
+			async request(
+				url: string,
+				options: RequestOptions,
+			): Promise<TransportResponse> {
+				requests.push(url);
+				options.signal?.throwIfAborted();
+				const headers = new Headers({location: 'https://example.test/next'});
+				const get = headers.get.bind(headers);
+				headers.get = (name: string) => {
+					if (name === 'location') between();
+					return get(name);
+				};
+				return {
+					url,
+					status: 302,
+					headers,
+					body: Buffer.alloc(0),
+					text: () => '',
+				};
+			},
+		};
+		return session;
+	};
+
+	/** Run `call` and collect every unhandled rejection until the process settles. */
+	const unhandledDuring = async (call: () => Promise<unknown>) => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on('unhandledRejection', onUnhandled);
+		try {
+			const error = await call().then(
+				() => expect.fail('expected a failure'),
+				(e: unknown) => e,
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+			await new Promise((resolve) => setImmediate(resolve));
+			return {error, unhandled};
+		} finally {
+			process.off('unhandledRejection', onUnhandled);
+		}
+	};
+
+	const target = recipe('https://example.test', {
+		navigate: {url: 'https://example.test/search?q={query}'},
+		timeoutMs: 1000,
+	});
+
+	it("the caller's abort rejects with its reason, nothing unhandled", async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop');
+		const session = redirectingSession(() => controller.abort(reason));
+		const {error, unhandled} = await unhandledDuring(() =>
+			runDeclarativeRecipe(target, 'q', {session, signal: controller.signal}),
+		);
+		expect(error).toBe(reason);
+		expect(session.requests).toHaveLength(2);
+		expect(unhandled).toEqual([]);
+	});
+
+	it('the recipe timeout rejects with timeout, nothing unhandled', async () => {
+		vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
+		const session = redirectingSession(() => vi.advanceTimersByTime(1000));
+		const {error, unhandled} = await unhandledDuring(() =>
+			runDeclarativeRecipe(target, 'q', {session}),
+		);
+		expect(error).toBeInstanceOf(SerpcastError);
+		expect((error as SerpcastError).kind).toBe('timeout');
+		expect(session.requests).toHaveLength(2);
+		expect(unhandled).toEqual([]);
 	});
 });

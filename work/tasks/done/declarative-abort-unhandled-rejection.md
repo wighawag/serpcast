@@ -25,3 +25,7 @@ In `packages/serpcast/src/declarative.ts`, `abortable(promise, signal)` rejects 
 ## Prompt
 
 Goal: a caller's abort or a recipe timeout must never crash the process. Keep the change small. FIRST, check this task against current reality (launch snapshot; may have drifted). RECORD non-obvious in-scope decisions.
+
+## Decisions
+
+- **Where the shared helper lives:** `declarative.ts` imports `untilAborted` from `./code.js`, the same way `browser.ts` already does. The alternative was moving it into a new shared module such as `src/abort.ts`, which is cleaner but touches three files for no change in behaviour. This doesn't create a circular import, because `code.ts` only imports a type from `declarative.ts`. Only the runner modules are affected.

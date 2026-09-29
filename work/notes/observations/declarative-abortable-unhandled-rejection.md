@@ -1,3 +1,0 @@
-# Aborting between redirect hops can leave an unhandled rejection
-
-2026-09-28, seen while writing the `engine-chain-and-state` tests. In `packages/serpcast/src/declarative.ts`, `abortable(promise, signal)` rejects at once when `signal` is already aborted and never attaches a handler to `promise`; if the session's `request()` then rejects (the real transport does, via `signal.throwIfAborted()`), that rejection is unhandled, which crashes a Node process by default. Reachable when the caller aborts (or the recipe timer fires) between two redirect hops. Fix: attach `promise.catch(() => {})` (or the `then`) before the early return.

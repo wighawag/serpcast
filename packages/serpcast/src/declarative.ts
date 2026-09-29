@@ -24,6 +24,7 @@ import {
 	requiresBrowser,
 	type Recipe,
 } from 'serpcast-recipe';
+import {untilAborted} from './code.js';
 import {SerpcastError} from './errors.js';
 import {parsePage} from './html.js';
 import type {TransportResponse, TransportSession} from './transport.js';
@@ -97,7 +98,7 @@ export async function runDeclarativeRecipe(
 			encodeURIComponent(query),
 		);
 		for (let redirects = 0; ; redirects++) {
-			const response = await abortable(
+			const response = await untilAborted(
 				options.session.request(url, {
 					kind: 'document',
 					signal,
@@ -185,16 +186,4 @@ function resolveLocation(location: string, from: string, name: string) {
 			{cause},
 		);
 	}
-}
-
-/** `promise`, or the signal's reason as soon as it aborts. */
-function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-	return new Promise<T>((resolve, reject) => {
-		const onAbort = () => reject(signal.reason);
-		if (signal.aborted) return onAbort();
-		signal.addEventListener('abort', onAbort, {once: true});
-		promise.then(resolve, reject).finally(() => {
-			signal.removeEventListener('abort', onAbort);
-		});
-	});
 }
