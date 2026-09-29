@@ -86,6 +86,9 @@ The request or search did not finish within its time limit.
 **`transport`**:
 The network or the server failed (connection error, unexpected status such as 5xx).
 
+**`decoy`**:
+An engine named in the caller's `decoyGuard` answered with a well-formed page of results unrelated to the query (the `isDecoy` rule). Recorded like any engine failure; starts NO cooldown, since a decoy is per query, not per engine.
+
 **`impersonation`**:
 The browser fingerprint cannot be guaranteed (libcurl-impersonate missing, plain libcurl, unknown target). It aborts the whole search rather than falling through to later engines.
 

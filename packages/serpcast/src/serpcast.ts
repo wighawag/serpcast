@@ -8,6 +8,11 @@
 //   with the wrong fingerprint, so it aborts the whole search at once.
 // - `blocked` starts a cooldown: the engine is skipped (and reported as a
 //   `blocked` failure saying so) until it ends.
+// - An engine named in `decoyGuard` whose answer is a decoy (decoy.ts) is a
+//   `decoy` failure and the chain moves on. No cooldown: a decoy is a
+//   property of (engine, query, moment), so cooling the engine would drop its
+//   good answers to other queries. The whole answer is judged, before the
+//   `maxResults` cut.
 // - The caller's abort rejects with the signal's reason and is not a failure.
 // - Any other error that is not a `SerpcastError` is a bug and is rethrown.
 //
@@ -45,6 +50,7 @@ import {
 } from './browser.js';
 import {isCodeRecipe, runCodeRecipe, type CodeRecipe} from './code.js';
 import type {StoredCookie} from './cookies.js';
+import {decoyTerms, isDecoy} from './decoy.js';
 import {runDeclarativeRecipe, type SearchResult} from './declarative.js';
 import {SerpcastError, type EngineFailure} from './errors.js';
 import {createMemoryStore, type JsonValue, type StateStore} from './store.js';
@@ -81,6 +87,12 @@ export interface SerpcastOptions extends TransportOptions {
 	transport?: ChainTransport;
 	/** How library-mode browser engines start searchcast (it gets `proxy` too). */
 	searchcast?: SearchcastLibraryOptions;
+	/**
+	 * The engines (by name) whose answers are checked with `isDecoy`: a decoy
+	 * page is a `decoy` failure and the next engine is tried (no cooldown).
+	 * Default: none.
+	 */
+	decoyGuard?: readonly string[];
 }
 
 export interface SearchOptions {
@@ -161,6 +173,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
 	const idleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 	const browser = createBrowserRunner(options);
+	const guarded = new Set(options.decoyGuard ?? []);
 
 	type Session = ReturnType<ChainTransport['session']>;
 	/** Each HTTP engine's live transport session, kept for its connections; `uses` counts searches running on it. */
@@ -293,6 +306,18 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 				}
 				try {
 					const results = await run(engine, query, {signal, maxResults});
+					if (guarded.has(name) && isDecoy(query, results)) {
+						const titles = results
+							.slice(0, 5)
+							.map((r) => JSON.stringify(r.title))
+							.join(', ');
+						const message = `${name}: decoy page, unrelated to the query terms ${decoyTerms(query).join(' ')} (top results: ${titles})`;
+						failures.push({
+							engine: name,
+							error: new SerpcastError('decoy', message),
+						});
+						continue;
+					}
 					return {
 						results:
 							maxResults === undefined ? results : results.slice(0, maxResults),

@@ -1,0 +1,12 @@
+# Decisions made while building decoy-guard (2026-09-29)
+
+Recorded for the `decoy-guard` done record. Code sites: `packages/serpcast/src/decoy.ts` (the rule), the `decoy` comment in `src/errors.ts`, and the `decoyGuard` bullet of the module comment in `src/serpcast.ts`.
+
+Reality check: the task file sat in `work/tasks/backlog/`, not `ready/` as the dispatch said, and the spec in `work/specs/tasked/`; its blocker `session-connection-reuse` is done. The premises held: the chain in `serpcast.ts` has one success path where the check fits, and `relevance.py` in my-boxes is as described.
+
+1. **A new kind `decoy`, not `blocked` with a flag.** `blocked` means "the site refused" and starts a cooldown; a decoy is a relevance judgement per query and must not cool the engine. Reusing `blocked` would have forced a flag to suppress the cooldown and made callers that branch on `blocked` (to rotate egress, say) treat a decoy as a refusal. Touches `SerpcastErrorKind` (public union: an exhaustive `switch` in caller code gains a case, hence a minor changeset) and CONTEXT.md.
+2. **The port is literal**: same stopword list, same ASCII `[a-z0-9]+` word pattern (so non-ASCII letters split words, as in the measured guard), same prefix length 5, top 5, at most 1 relevant. Changing any of these would make the deployed rule differ from the measured one. Alternative: Unicode word matching; rejected for that reason.
+3. **The whole answer is judged, before the `maxResults` cut.** The guard judges the engine's page, not what the caller asked to keep; with `maxResults: 2` a judged page of 2 would never be judged (fewer than 3 results). Alternative: judge after the cut; rejected.
+4. **The failure message** is `<engine>: decoy page, unrelated to the query terms <terms> (top results: "<t1>", ...)`, the terms as computed by the rule (sorted, stopwords removed) so the message shows what was matched. An internal helper `decoyTerms` computes them; only `isDecoy` is exported (the task asked for that one function).
+5. **Guard names are exact engine names** (a `Set` of the `decoyGuard` strings); a name not in the chain is silently ignored, like an unknown name in `clearSessions`. No validation error added.
+6. The CONTEXT.md glossary gained only the `decoy` error kind (the task's ask); the word "decoy" is defined there. No separate "Decoy guard" glossary term was added; the README section documents the option.

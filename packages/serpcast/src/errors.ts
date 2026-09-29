@@ -8,6 +8,13 @@ export type SerpcastErrorKind =
 	| 'timeout'
 	| 'transport'
 	| 'impersonation'
+	/**
+	 * An engine named in `decoyGuard` answered with a page unrelated to the
+	 * query (see decoy.ts). A kind of its own, not `blocked` with a flag: it
+	 * starts no cooldown (decoys are per query), and a caller branching on
+	 * `blocked` would otherwise conflate a refusal with a relevance judgement.
+	 */
+	| 'decoy'
 	| 'exhausted';
 
 /** One engine of the chain that did not answer, and why. */

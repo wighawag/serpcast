@@ -175,6 +175,105 @@ describe('createSerpcast: cooldowns', () => {
 	});
 });
 
+describe('createSerpcast: decoyGuard', () => {
+	const query = 'debian bookworm backports kernel install';
+	const decoy = () => pages.results('RuneScape', 'Kernel', 'Install', 'Wiki');
+	const genuine = () =>
+		pages.results('Debian-backports', 'Debian-kernel', 'Other', 'Else');
+
+	it('turns a decoy answer of a guarded engine into a decoy failure and tries the next engine', async () => {
+		const {serpcast, hits} = setup(
+			{a: decoy, b: () => pages.results('B')},
+			{decoyGuard: ['a']},
+		);
+		const response = await serpcast.search(query, {engines: [a, b]});
+		expect(response.engine).toBe('b');
+		expect(kinds(response.failures)).toEqual([['a', 'decoy']]);
+		const {message} = response.failures[0]!.error;
+		expect(message).toContain('backports bookworm debian install kernel');
+		expect(message).toContain('"RuneScape", "Kernel", "Install", "Wiki"');
+		expect(hits('a')).toHaveLength(1);
+	});
+
+	it('judges the whole answer, before the maxResults cut', async () => {
+		const {serpcast} = setup(
+			{a: decoy, b: () => pages.results('B')},
+			{decoyGuard: ['a']},
+		);
+		const response = await serpcast.search(query, {
+			engines: [a, b],
+			maxResults: 1,
+		});
+		expect(kinds(response.failures)).toEqual([['a', 'decoy']]);
+	});
+
+	it('passes a relevant answer of a guarded engine', async () => {
+		const {serpcast} = setup({a: genuine}, {decoyGuard: ['a']});
+		const response = await serpcast.search(query, {engines: [a]});
+		expect(response.engine).toBe('a');
+		expect(response.failures).toEqual([]);
+	});
+
+	it('never judges an unguarded engine, and is off by default', async () => {
+		const guarded = setup({a: decoy, b: decoy}, {decoyGuard: ['b']});
+		const response = await guarded.serpcast.search(query, {engines: [a, b]});
+		expect(response.engine).toBe('a');
+		expect(response.results.map((r) => r.title)[0]).toBe('RuneScape');
+
+		const plain = setup({a: decoy});
+		expect((await plain.serpcast.search(query, {engines: [a]})).engine).toBe(
+			'a',
+		);
+	});
+
+	it('starts no cooldown: the engine is tried again at once, and answers another query', async () => {
+		const {serpcast, hits, time} = setup(
+			{
+				a: (request) =>
+					request.url.includes('debian') ? decoy() : pages.results('A'),
+				b: () => pages.results('B'),
+			},
+			{decoyGuard: ['a']},
+		);
+		await serpcast.search(query, {engines: [a, b]});
+		time.advance(1);
+		const again = await serpcast.search(query, {engines: [a, b]});
+		expect(hits('a')).toHaveLength(2); // not skipped
+		expect(kinds(again.failures)).toEqual([['a', 'decoy']]);
+		const other = await serpcast.search('q', {engines: [a, b]});
+		expect(other.engine).toBe('a');
+	});
+
+	it('lists a decoy in exhausted like any failure', async () => {
+		const {serpcast} = setup({a: decoy, b: pages.broken}, {decoyGuard: ['a']});
+		const error = await failure(serpcast.search(query, {engines: [a, b]}));
+		expect(error.kind).toBe('exhausted');
+		expect(kinds(error.failures)).toEqual([
+			['a', 'decoy'],
+			['b', 'recipe'],
+		]);
+	});
+
+	it('applies to code recipes too', async () => {
+		const code = {
+			name: 'code',
+			search: () =>
+				['Why', 'WHY meaning', 'why - Wiktionary'].map((title, i) => ({
+					title,
+					url: `https://dictionary.test/${i}`,
+				})),
+		};
+		const {serpcast} = setup(
+			{b: () => pages.results('B')},
+			{decoyGuard: ['code']},
+		);
+		const response = await serpcast.search('why does git rebase rewrite', {
+			engines: [code, b],
+		});
+		expect(kinds(response.failures)).toEqual([['code', 'decoy']]);
+	});
+});
+
 describe('createSerpcast: sessions', () => {
 	const withCookie = (name: string) => (request: FakeRequest) => ({
 		...(pages.results(name) as {body: string}),

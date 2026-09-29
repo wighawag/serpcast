@@ -19,6 +19,7 @@ export {
 	type Serpcast,
 	type SerpcastOptions,
 } from './serpcast.js';
+export {isDecoy} from './decoy.js';
 export {
 	createMemoryStore,
 	type JsonValue,
