@@ -28,7 +28,13 @@ export const GITHUB_REPO = 'wighawag/serpcast';
 // relative link to them is dead on npmjs.com and MUST be rewritten to an
 // absolute GitHub URL. (`README.md` and `LICENSE` DO ship, so they stay
 // relative and keep working from the tarball.)
-const NON_SHIPPED_PREFIXES = ['work/', 'docs/', 'packages/', 'CONTEXT.md'];
+const NON_SHIPPED_PREFIXES = [
+	'work/',
+	'docs/',
+	'packages/',
+	'examples/',
+	'CONTEXT.md',
+];
 
 // Resolve the git ref the published README should pin its links to. Priority:
 //   1. `${name}@${version}` from the package's own package.json. This repo

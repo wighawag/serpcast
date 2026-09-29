@@ -161,6 +161,9 @@ describe('rewriteReadmeLinks', () => {
 		expect(
 			rewriteReadmeLinks('[x](packages/serpcast-recipe/LICENSE)', {ref}),
 		).toBe(`[x](${base}/packages/serpcast-recipe/LICENSE)`);
+		expect(
+			rewriteReadmeLinks('[x](examples/recipes/marginalia.mjs)', {ref}),
+		).toBe(`[x](${base}/examples/recipes/marginalia.mjs)`);
 		expect(rewriteReadmeLinks('[x](CONTEXT.md)', {ref})).toBe(
 			`[x](${base}/CONTEXT.md)`,
 		);

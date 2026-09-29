@@ -172,7 +172,24 @@ const {results} = await serpcast.search('some query', {engines: [myApi, loadReci
 
 The results are validated: an array of `{title, url, snippet?, ...}` with a non-empty `title` and `url` and every field a string (fields set to `undefined` are dropped). Anything else is a `recipe` error, and so is any throw that is not a `SerpcastError` (with the original as `cause`). `[]` is a valid answer: the module says the site has no results, and the chain stops there, so throw `recipeError` when the response is not one you understand. The whole search is bounded by `timeoutMs` (a `timeout` error); aborting the caller's `signal` rejects with its reason.
 
-serpcast ships no code recipe for a real site: write your own, for engines whose terms allow automated access.
+serpcast ships no code recipe for a real site as part of the package: write your own, for engines whose terms allow automated access. The repo has one example to start from.
+
+### Example: Marginalia Search
+
+[`examples/recipes/marginalia.mjs`](examples/recipes/marginalia.mjs) is a code recipe for [Marginalia Search](https://marginalia-search.com), an independent web search engine that offers an API meant for programs. It is an example, not an engine bundled with serpcast: it lives in the repo, outside the published packages, so get it from the repo (a clone, or the file itself).
+
+The terms, from [Marginalia's API page](https://about.marginalia-search.com/article/api/) (read 2026-09-29): the key `public` is for experimentation and its rate limit is shared by everyone who uses it (the API answers HTTP 503 when it is hit); for regular use, ask Marginalia for a free personal (non-commercial) key, or buy one on that page. Results are provided under [CC-BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), so what you do with them has to respect that licence.
+
+```ts
+import {createSerpcast, loadCodeRecipe} from 'serpcast';
+
+const serpcast = createSerpcast();
+// Reads MARGINALIA_API_KEY at each search, else uses the shared `public` key.
+const marginalia = await loadCodeRecipe('./examples/recipes/marginalia.mjs');
+const {results} = await serpcast.search('linear b', {engines: [marginalia], maxResults: 10});
+```
+
+Or copy the file next to your private recipes and load it from there. It calls the URL-keyed API (`https://api.marginalia.nu/<key>/search/<query>?count=<n>`), which Marginalia lists as deprecated but working as long as the project does, because the current API takes the key in an `API-Key` header and serpcast's transport sends only Chrome's headers. It maps each result's `title`, `url` and `description` (as `snippet`), sends `maxResults` as `count` (clamped to 1..100), treats HTTP 503 and 429 (the rate limit) as `blocked` so the engine cools down, and a response without a `results` array as a `recipe` error. The key is part of the URL, so it appears in the URL that error messages name.
 
 ## Browser engines (searchcast)
 
