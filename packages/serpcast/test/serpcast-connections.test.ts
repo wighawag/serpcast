@@ -163,7 +163,17 @@ describe('createSerpcast: engine connections', () => {
 	});
 
 	it('gives a concurrent search on the same engine its own session, closed after', async () => {
-		const {serpcast, sessions} = setup({a: withCookie('a')});
+		// Each request in its own millisecond, so the two sessions stamp the
+		// same cookie with different `created` times (as on a slow machine):
+		// the engine's kept session is still reused after the concurrent
+		// search saved its copy last.
+		vi.useFakeTimers({toFake: ['Date']});
+		const {serpcast, sessions} = setup({
+			a: (request) => {
+				vi.advanceTimersByTime(1);
+				return withCookie('a')(request);
+			},
+		});
 		await Promise.all([
 			serpcast.search('q', {engines: [a]}),
 			serpcast.search('q', {engines: [a]}),
@@ -171,6 +181,29 @@ describe('createSerpcast: engine connections', () => {
 		expect(closed(sessions)).toEqual([0, 1]);
 		await serpcast.search('q', {engines: [a]});
 		expect(sessions).toHaveLength(2);
+		expect(closed(sessions)).toEqual([0, 1]);
+	});
+
+	it('starts a new session when a concurrent search saved different cookies last', async () => {
+		let n = 0;
+		const {serpcast, sessions, hits} = setup({
+			a: (request) => ({
+				...(pages.results('A') as {body: string}),
+				setCookie: request.cookie ? [] : [`sid=${n++}; Path=/`],
+			}),
+		});
+		await Promise.all([
+			serpcast.search('q', {engines: [a]}),
+			serpcast.search('q', {engines: [a]}),
+		]);
+		await serpcast.search('q', {engines: [a]});
+		expect(hits('a').map((r) => r.cookie)).toEqual([
+			undefined,
+			undefined,
+			'sid=1',
+		]);
+		expect(sessions).toHaveLength(3);
+		expect(closed(sessions)).toEqual([1, 1, 0]);
 	});
 
 	it('closes a session dropped while a search runs on it once that search ends', async () => {

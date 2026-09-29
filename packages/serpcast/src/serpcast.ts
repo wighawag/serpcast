@@ -123,6 +123,37 @@ interface SessionRecord {
 	state?: {[key: string]: JsonValue};
 }
 
+/**
+ * Whether two cookie lists hold the same cookies: every field but `created`
+ * (the time a jar took the cookie in), in any order. Two sessions that got the
+ * same `Set-Cookie` a millisecond apart hold the same cookies, so the live
+ * session is reused after a concurrent search saved its copy (decision 13 in
+ * work/notes/observations/session-connection-reuse-decisions.md).
+ */
+function sameCookies(
+	a: readonly StoredCookie[],
+	b: readonly StoredCookie[],
+): boolean {
+	const canonical = (cookies: readonly StoredCookie[]) =>
+		JSON.stringify(
+			cookies
+				.map((c) =>
+					JSON.stringify([
+						c.name,
+						c.value,
+						c.domain,
+						c.hostOnly,
+						c.path,
+						c.secure,
+						c.httpOnly,
+						c.expires ?? null,
+					]),
+				)
+				.sort(),
+		);
+	return canonical(a) === canonical(b);
+}
+
 export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	const now = options.now ?? Date.now;
 	const store = options.store ?? createMemoryStore({now});
@@ -153,10 +184,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	const acquire = (name: string, cookies: readonly StoredCookie[]) => {
 		let entry = live.get(name);
 		if (entry && entry.uses > 0) return transport.session(cookies);
-		if (
-			!entry ||
-			JSON.stringify(entry.session.cookies()) !== JSON.stringify(cookies)
-		) {
+		if (!entry || !sameCookies(entry.session.cookies(), cookies)) {
 			drop(name);
 			entry = {session: transport.session(cookies), uses: 0};
 			live.set(name, entry);
