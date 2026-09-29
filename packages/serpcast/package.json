@@ -61,6 +61,7 @@
 	},
 	"scripts": {
 		"build": "tsc",
+		"prepack": "node ../../scripts/copy-publish-assets.mjs",
 		"test": "vitest run",
 		"test:watch": "vitest"
 	}

@@ -9,7 +9,7 @@ Getting keyless web search results today usually means running SearXNG. What Sea
 - Engines are tried as an ordered **engine chain**, first answer wins, with searchcast (a real browser) as the fallback when HTTP is blocked.
 - serpcast is **not** an anonymity tool, and it is built so one can use it safely: the caller injects the proxy, the state store and the recipe set; serpcast makes no network call the caller did not cause and writes nothing to disk on its own ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)).
 
-Status: in development. The packages below are published at `0.0.0` as name placeholders; the functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner, code recipes and browser engines (searchcast), with `serpcast query` for recipe development, `serpcast install-libcurl` to install the native library and `serpcast doctor` to check it.
+Status: in development (0.x; the API may still change between minor versions). The functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner, code recipes and browser engines (searchcast), with `serpcast query` for recipe development, `serpcast install-libcurl` to install the native library and `serpcast doctor` to check it.
 
 ## Packages
 
@@ -336,6 +336,10 @@ pnpm test
 `pnpm format:check && pnpm build && pnpm test` is the verify gate (`dorfl.json`) and what CI runs on every push and pull request. Tests run against the built packages, so build before testing.
 
 The transport tests that need the native library run only when `SERPCAST_LIBCURL_PATH` points at a libcurl-impersonate shared library (and the plain-libcurl strict-mode tests only when `SERPCAST_TEST_PLAIN_LIBCURL` points at a plain libcurl); otherwise they are skipped with a message. CI installs the pinned release with `serpcast install-libcurl` itself (into a temporary data directory, checksum verified) and sets both, so they always run there.
+
+## Release
+
+Both packages are released with [changesets](https://github.com/changesets/changesets), each with its own version. A PR that should ship adds a changeset (`pnpm changeset`, pick the packages and the bump). On main, the `release` workflow (`.github/workflows/release.yml`) opens or updates a "Version Packages" PR from the pending changesets; merging it publishes the bumped packages to npm through npm Trusted Publishing (OIDC, no token), with provenance. The published `serpcast` package carries this README and the AGPL `LICENSE`, copied in at pack time by `scripts/copy-publish-assets.mjs`; `serpcast-recipe` ships its own README and MIT `LICENSE`.
 
 ## License
 
