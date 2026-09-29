@@ -48,6 +48,10 @@ _Avoid_: default headers, user agent
 What a request is, from the browser's point of view, which selects its header table: document navigation, same-origin navigation, fetch/XHR, or script.
 _Avoid_: request type, mode
 
+**Fetch site**:
+How a `fetch` or `script` request relates to the page it comes from (its referer): `same-origin`, `same-site` (same scheme and registrable domain, any port) or `cross-site`, Chrome's `sec-fetch-site`. Derived from the URLs by a small built-in site rule (no public suffix list), overridable per request with `fetchSite`; it also decides the referer (the page's origin only, when not same-origin), `origin` and `sec-fetch-storage-access`.
+_Avoid_: request site, origin type
+
 **Strict mode**:
 The default check that refuses to send any request unless libcurl-impersonate is loaded and accepts the impersonation target.
 _Avoid_: safe mode

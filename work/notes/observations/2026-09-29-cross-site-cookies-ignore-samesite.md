@@ -1,0 +1,3 @@
+# Cross-site requests are sent cookies Chrome would drop (SameSite not stored)
+
+2026-09-29, from the `sec-fetch-site-by-initiator` capture: for a cross-site `script` or credentialed `fetch`, Chromium sent only the `SameSite=None; Secure` cookie and dropped the default (Lax) one. serpcast's cookie store (`packages/serpcast/src/cookies.ts`) does not store `SameSite`, so a cross-site request (now labelled `sec-fetch-site: cross-site`) is sent every matching cookie. Rare in practice (the session must hold cookies of that other site), but a coherence gap; fixing it changes the persisted `StoredCookie` shape, so it is its own task.

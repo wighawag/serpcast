@@ -28,9 +28,12 @@ export {
 } from './store.js';
 export {
 	CHROME_MAJOR,
+	FETCH_SITES,
 	IMPERSONATE_TARGET,
 	REQUEST_KINDS,
+	fetchSite,
 	headerTable,
+	type FetchSite,
 	type HeaderTable,
 	type RequestKind,
 } from './chrome.js';

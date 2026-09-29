@@ -84,11 +84,13 @@ describe.skipIf(!LIB)('transport (native libcurl-impersonate)', () => {
 		async (kind) => {
 			const session = transport.session();
 			const path = `/kind/${kind}`;
-			const request = kind === 'document' ? {kind} : {kind, referer: REFERER};
+			// Same-origin with the request: another port would be same-site.
+			const referer = url('/page');
+			const request = kind === 'document' ? {kind} : {kind, referer};
 			const response = await session.request(url(path), request as never);
 			expect(response.status).toBe(200);
 			const expected = headerTable(kind, {
-				referer: kind === 'document' ? undefined : REFERER,
+				referer: kind === 'document' ? undefined : referer,
 			});
 			expect(seen.get(path)).toEqual([
 				...[
@@ -105,6 +107,44 @@ describe.skipIf(!LIB)('transport (native libcurl-impersonate)', () => {
 			]);
 		},
 	);
+
+	it.each([
+		['script', 'same-site', 'https://localhost:1/page?q=x'],
+		['fetch', 'same-site', 'https://localhost:1/page?q=x'],
+		['script', 'cross-site', 'https://example.test/page?q=x'],
+		['fetch', 'cross-site', 'https://example.test/page?q=x'],
+		['fetch', 'cross-site', 'http://localhost/page?q=x'],
+	] as const)(
+		'sends exactly the captured %s table for a %s request (from %s)',
+		async (kind, site, referer) => {
+			const path = `/site/${kind}/${site}/${encodeURIComponent(referer)}`;
+			await transport.session().request(url(path), {kind, referer});
+			const {origin} = new URL(referer);
+			const wire = seen.get(path)!;
+			expect(wire.slice(8)).toEqual(
+				headerTable(kind, {referer, url: url(path)}).flat(),
+			);
+			const header = (name: string) => wire[wire.indexOf(name) + 1];
+			expect(header('sec-fetch-site')).toBe(site);
+			expect(header('referer')).toBe(`${origin}/`);
+			if (kind === 'fetch') expect(header('origin')).toBe(origin);
+			else expect(wire).not.toContain('origin');
+			if (site === 'cross-site')
+				expect(header('sec-fetch-storage-access')).toBe('active');
+			else expect(wire).not.toContain('sec-fetch-storage-access');
+		},
+	);
+
+	it('lets fetchSite override the derived sec-fetch-site', async () => {
+		const path = '/site/override';
+		const referer = 'https://localhost:1/page';
+		await transport
+			.session()
+			.request(url(path), {kind: 'script', referer, fetchSite: 'cross-site'});
+		expect(seen.get(path)!.slice(8)).toEqual(
+			headerTable('script', {referer, fetchSite: 'cross-site'}).flat(),
+		);
+	});
 
 	it('sets the PRIORITY flag on the HTTP/2 HEADERS frame (exclusive, weight 256), as Chrome does', async () => {
 		const before = server.received.length;

@@ -30,7 +30,12 @@
 // callbacks while exit waited for the worker.
 
 import {DEFAULT_TIMEOUT_MS} from 'serpcast-recipe';
-import {headerTable, IMPERSONATE_TARGET, type RequestKind} from './chrome.js';
+import {
+	headerTable,
+	IMPERSONATE_TARGET,
+	type FetchSite,
+	type RequestKind,
+} from './chrome.js';
 import {CookieStore, type StoredCookie} from './cookies.js';
 import {SerpcastError} from './errors.js';
 import {respond, type TransportResponse} from './response.js';
@@ -61,9 +66,17 @@ export interface TransportOptions {
 	maxBodyBytes?: number;
 }
 
+/**
+ * `referer` is the page the request comes from. For `fetch` and `script`,
+ * `sec-fetch-site` (and the headers that change with it) is derived from the
+ * URL relative to it; `fetchSite` overrides that for a caller who knows
+ * better (the built-in site rule does not know private suffixes such as
+ * `github.io`, see `registrableDomain`).
+ */
 export type RequestOptions = {signal?: AbortSignal; timeoutMs?: number} & (
-	| {kind: 'document'; referer?: undefined}
-	| {kind: Exclude<RequestKind, 'document'>; referer: string}
+	| {kind: 'document'; referer?: undefined; fetchSite?: undefined}
+	| {kind: 'same-origin-navigation'; referer: string; fetchSite?: undefined}
+	| {kind: 'fetch' | 'script'; referer: string; fetchSite?: FetchSite}
 );
 
 export type {TransportResponse};
@@ -171,6 +184,8 @@ export function createTransport(options: TransportOptions = {}): Transport {
 					const target = parseUrl(url);
 					const table = headerTable(request.kind, {
 						referer: request.referer,
+						url: target,
+						fetchSite: request.fetchSite,
 						cookie: jar.header(target),
 					});
 					request.signal?.throwIfAborted();

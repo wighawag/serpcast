@@ -1,9 +1,11 @@
 // The transport session's cookies. serpcast owns them (libcurl's cookie engine
 // is never used) so the `cookie` header lands where Chrome puts it in the
 // header table. RFC 6265 storage and matching, Chrome's send order (longest
-// path first, then oldest). SameSite is not enforced: every request kind
-// serpcast sends is same-site. There is no public suffix list, so a `Domain`
-// attribute must equal the host or contain a dot.
+// path first, then oldest). SameSite is not enforced (not even stored): a
+// cross-site `fetch` or `script` (chrome.ts `fetchSite`) is sent every cookie
+// that matches its URL, where Chrome would drop those without
+// `SameSite=None`. There is no public suffix list, so a `Domain` attribute
+// must equal the host or contain a dot.
 
 /** One stored cookie; plain JSON, so a caller's state store can keep it. */
 export interface StoredCookie {

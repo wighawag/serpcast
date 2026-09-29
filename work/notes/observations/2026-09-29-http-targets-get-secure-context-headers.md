@@ -1,0 +1,3 @@
+# Plain-http targets get secure-context headers Chrome would not send
+
+2026-09-29, noticed while capturing `work/notes/findings/sec-fetch-site-by-initiator.md`: Chromium sends no `sec-fetch-*` and no client hints (`sec-ch-ua*`) to a non-secure `http://` URL (the one HTTP/1.1 request in the capture carried neither, and used `Accept-Encoding: gzip, deflate`), but serpcast's header tables (`packages/serpcast/src/chrome.ts`) are the same for `http://` and `https://` targets, and an `https` page loading an `http` URL would send no `referer` under the default policy. Only matters for recipes that request `http://` URLs; not addressed by the sec-fetch-site task.
