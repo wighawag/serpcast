@@ -29,7 +29,10 @@ const transport = createTransport({proxy: 'socks5h://127.0.0.1:9050'});
 const session = transport.session(); // cookies; session.cookies() is plain JSON
 const page = await session.request('https://example.com/', {kind: 'document'});
 const api = await session.request('https://example.com/api?q=x', {kind: 'fetch', referer: page.url});
+session.close(); // closes the session's connections (cookies are kept)
 ```
+
+- **Connections.** A session keeps its connections open between its requests and reuses them, as Chrome does: one HTTP/2 connection per origin (concurrent requests to an origin wait for it rather than opening a second one), through the same proxy tunnel when there is a proxy. Connections are never shared between sessions: sessions (two engines, two callers) must stay unlinkable, and a shared connection would link them at the TLS and IP layer. `session.close()` closes them (at once when idle, else when the requests in flight settle); a later request opens a new one. An idle session keeps nothing running, so it never keeps the process alive.
 
 - **Proxy and DNS.** The proxy URL (`http://`, `socks5://`, `socks5h://`) is passed to libcurl as given, and its scheme decides where DNS is resolved: **`socks5h://` resolves host names at the proxy, `socks5://` resolves them locally**, on this host. Callers that want no local DNS must pass `socks5h://`. With no proxy, the connection is direct: libcurl's proxy environment variables (`http_proxy`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) are ignored, so the caller's option is the only egress policy.
 - **Finding the library.** In order: the `libcurlPath` option, `SERPCAST_LIBCURL_PATH`, `LIBCURL_PATH`, then `libcurl-impersonate.so` (`.dylib`, `.dll`) in serpcast's data directory (`$XDG_DATA_HOME/serpcast/`, default `~/.local/share/serpcast/`), where [`serpcast install-libcurl`](#installing-libcurl-impersonate) puts it. Nothing else is searched, and the library is never downloaded as a side effect: only that command, typed by you, downloads it. The pinned release and its checksums are `LIBCURL_IMPERSONATE` (libcurl-impersonate 2.1.1). The library is loaded once per process, so its path is process-global: a second instance asking for a different path fails with an `impersonation` error.
@@ -56,7 +59,7 @@ try {
 	else throw error;
 }
 await serpcast.clearSessions(); // or clearSessions('first'), by engine name
-await serpcast.close(); // stops a library-mode browser, if one was started
+await serpcast.close(); // closes engine connections, stops a library-mode browser if one was started
 ```
 
 `createSerpcast(options)` takes the transport options (`libcurlPath`, `proxy`, `strict`, `timeoutMs`, `caPath`, `maxBodyBytes`, see above) plus:
@@ -94,7 +97,7 @@ interface StateStore {
 
 serpcast namespaces its keys per engine name: `engine/<name>/session` (the engine's cookies and last use) and `engine/<name>/cooldown` (when it ends), with `<name>` URL-encoded, plus `serpcast/sessions`, the list of engines with a session (so `clearSessions()` finds them in any store). Every value carries the time serpcast relies on and is checked with serpcast's clock, and every `set` passes a `ttlMs` so the store can drop it; a store that expires late is still correct. Give each identity its own store (or key prefix) to keep their sessions apart.
 
-**Sessions.** Each engine gets a transport session whose cookies (and, for a code recipe, its `ctx.session` state) are loaded from the store before the engine runs and saved after, whatever the outcome (a challenge page may set the cookie that lets the next attempt through). A session unused for `sessionIdleMs` is dropped, and `clearSessions(engine?)` drops one engine's session or all of them. Two concurrent searches on the same engine each save their own cookies; the last save wins.
+**Sessions.** Each engine gets a transport session whose cookies (and, for a code recipe, its `ctx.session` state) are loaded from the store before the engine runs and saved after, whatever the outcome (a challenge page may set the cookie that lets the next attempt through). A session unused for `sessionIdleMs` is dropped, and `clearSessions(engine?)` drops one engine's session or all of them. Two concurrent searches on the same engine each save their own cookies; the last save wins. The instance also keeps each engine's transport session between searches, so the next search reuses its open connections (never another engine's); they are closed when the engine's session is dropped (idle for `sessionIdleMs`, `clearSessions()`, or `close()`), or when the store holds other cookies for it (another instance saved them). An engine's connections never keep the process alive.
 
 ## Declarative recipes over HTTP
 

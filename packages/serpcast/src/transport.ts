@@ -3,8 +3,17 @@
 // table of the request kind, through the caller's proxy only. Redirects are
 // NOT followed and statuses are NOT interpreted: each hop is its own request,
 // so cookies and the header table apply per hop, and the caller decides what
-// a status means. Bodies are decoded in response.ts. One easy handle (so one
-// connection) per request: no connection reuse across requests yet.
+// a status means. Bodies are decoded in response.ts.
+//
+// Connections: each request is a fresh easy handle (impersonation applied to
+// it, so the fingerprint is set up exactly as before), added to its SESSION's
+// multi handle, whose connection cache keeps the connection open for the
+// session's next request to the same origin (through the same proxy), as
+// Chrome keeps one HTTP/2 connection per origin. Connections are shared ONLY
+// within one session, never across sessions: sessions (two engines, two
+// callers) must stay unlinkable, and a shared connection would link them at
+// the TLS and IP layer. `close()` releases a session's connections. Decisions:
+// work/notes/observations/session-connection-reuse-decisions.md.
 //
 // Egress: CURLOPT_PROXY is always set (to "" when the caller gave no proxy) and
 // CURLOPT_NOPROXY to "", so libcurl's proxy environment variables (http_proxy,
@@ -13,8 +22,9 @@
 // are allowed.
 //
 // Threads: every libcurl call, and so every write/header callback, runs on the
-// main thread. A request is one easy handle in its own multi handle, driven by
-// `drive` from event-loop timers; nothing stays in native code between turns.
+// main thread. A session's multi handle is driven by `Connections` from
+// event-loop timers while a request is in flight; nothing stays in native code
+// between turns, and nothing is scheduled while the session is idle.
 // `curl_easy_perform` on a worker thread (koffi `.async`) deadlocked
 // `process.exit()`: the worker waited for the main thread to run its JS
 // callbacks while exit waited for the worker.
@@ -67,11 +77,20 @@ export interface LibraryInfo {
 	impersonating: boolean;
 }
 
-/** Requests sharing one set of cookies; `cookies()` is plain JSON for a state store. */
+/**
+ * Requests sharing one set of cookies and one set of connections (never shared
+ * with another session); `cookies()` is plain JSON for a state store.
+ */
 export interface TransportSession {
 	request(url: string, options: RequestOptions): Promise<TransportResponse>;
 	cookies(): StoredCookie[];
 	clearCookies(): void;
+	/**
+	 * Close the session's connections: at once when no request is in flight,
+	 * else as soon as those settle (they are not aborted). Cookies are kept,
+	 * and a later request opens a new connection.
+	 */
+	close(): void;
 }
 
 export interface Transport {
@@ -93,6 +112,7 @@ const OPT = {
 	NOSIGNAL: 99,
 	TIMEOUT_MS: 155,
 	NOPROXY: 10177,
+	PIPEWAIT: 237,
 	PROTOCOLS_STR: 10318,
 	QUICK_EXIT: 322,
 };
@@ -142,9 +162,11 @@ export function createTransport(options: TransportOptions = {}): Transport {
 		check: async () => (await check()).info,
 		session(saved) {
 			const jar = new CookieStore(saved);
+			let connections: Connections | undefined;
 			return {
 				cookies: () => jar.list(),
 				clearCookies: () => jar.clear(),
+				close: () => connections?.close(),
 				async request(url, request) {
 					const target = parseUrl(url);
 					const table = headerTable(request.kind, {
@@ -153,8 +175,10 @@ export function createTransport(options: TransportOptions = {}): Transport {
 					});
 					request.signal?.throwIfAborted();
 					const {curl, info} = await check();
+					connections ??= new Connections(curl);
 					const response = await perform(
 						curl,
+						connections,
 						info.impersonating,
 						target.href,
 						table,
@@ -186,6 +210,7 @@ let proto: unknown;
 
 async function perform(
 	curl: Libcurl,
+	connections: Connections,
 	impersonate: boolean,
 	url: string,
 	table: [string, string][],
@@ -238,6 +263,10 @@ async function perform(
 		set(OPT.NOPROXY, 'str', '');
 		set(OPT.PROTOCOLS_STR, 'str', 'http,https');
 		set(OPT.NOSIGNAL, 'long', 1);
+		// A request to an origin whose connection is still being set up waits
+		// for it to say whether it multiplexes (HTTP/2), instead of opening a
+		// second connection: Chrome keeps one connection per origin.
+		set(OPT.PIPEWAIT, 'long', 1);
 		// Do not wait for a pending DNS lookup when an aborted or timed-out
 		// request is cleaned up: that wait would now block the main thread.
 		set(OPT.QUICK_EXIT, 'long', 1);
@@ -250,7 +279,7 @@ async function perform(
 		set(OPT.ERRORBUFFER, 'void *', errbuf);
 		set(OPT.WRITEFUNCTION, proto, onData);
 		set(OPT.HEADERFUNCTION, proto, onHeader);
-		const code = await drive(curl, handle, url, request.signal);
+		const code = await connections.run(handle, url, request.signal);
 		if (code === E_TIMEDOUT)
 			throw new SerpcastError('timeout', `request to ${url} timed out`);
 		if (code === E_WRITE && tooLarge) {
@@ -275,106 +304,178 @@ async function perform(
 	}
 }
 
+interface Transfer {
+	easy: unknown;
+	url: string;
+	signal: AbortSignal | undefined;
+	onAbort: () => void;
+	resolve: (code: number) => void;
+	reject: (error: unknown) => void;
+}
+
 /**
- * Run one easy handle to completion in its own multi handle, from the main
- * thread: the transfer's libcurl result code, or the signal's reason once it
- * aborts (the handle is then dropped at once, whatever it was doing). The
- * multi handle is removed before this settles, so the caller may clean the
- * easy handle up.
+ * One session's connections: a multi handle (and so libcurl's connection
+ * cache, and its TLS session cache) that every request of the session is
+ * added to, driven from the main thread. `run` adds one easy handle and
+ * settles with the transfer's libcurl result code, or the signal's reason once
+ * it aborts (the handle is then dropped at once, whatever it was doing). The
+ * easy handle is removed from the multi handle before `run` settles, so the
+ * caller may clean it up; the connection it used stays in the cache for the
+ * session's next request. Nothing runs while no request is in flight (no
+ * timer, no Node handle), so idle connections do not keep the process alive.
+ * `close` drops the multi handle, closing its connections, once no request is
+ * in flight (at once when idle); the next request opens a new one.
  */
-function drive(
-	curl: Libcurl,
-	easy: unknown,
-	url: string,
-	signal: AbortSignal | undefined,
-): Promise<number> {
-	return new Promise<number>((resolve, reject) => {
-		const multiError = (call: string, code: number) =>
-			new SerpcastError(
-				'transport',
-				`request to ${url} failed: ${call}: ${curl.multiStrerror(code)} (curlm ${code})`,
-			);
-		const multi = curl.multiInit();
-		if (!multi) {
-			reject(new SerpcastError('transport', 'curl_multi_init failed'));
-			return;
-		}
-		const added: number = curl.multiAdd(multi, easy);
-		if (added !== 0) {
-			curl.multiCleanup(multi);
-			reject(multiError('curl_multi_add_handle', added));
-			return;
-		}
-		let timer: NodeJS.Timeout | undefined;
-		let immediate: NodeJS.Immediate | undefined;
-		let settled = false;
-		const cancel = () => {
-			if (timer) clearTimeout(timer);
-			if (immediate) clearImmediate(immediate);
-			timer = immediate = undefined;
-		};
-		const schedule = (ms: number) => {
-			cancel();
-			if (ms <= 0) immediate = setImmediate(tick);
-			else timer = setTimeout(tick, ms);
-		};
-		const settle = (done: () => void) => {
-			settled = true;
-			cancel();
-			signal?.removeEventListener('abort', onAbort);
-			curl.multiRemove(multi, easy);
-			curl.multiCleanup(multi);
-			done();
-		};
-		const onAbort = () => schedule(0);
-		function tick() {
-			timer = immediate = undefined;
-			if (settled) return;
-			try {
-				step();
-			} catch (error) {
-				if (!settled) settle(() => reject(error));
-			}
-		}
-		function step() {
-			if (signal?.aborted) {
-				settle(() => reject(signal.reason));
-				return;
-			}
-			const running = [0];
-			const performed: number = curl.multiPerform(multi, running);
-			if (performed !== 0) {
-				settle(() => reject(multiError('curl_multi_perform', performed)));
-				return;
-			}
-			const queued = [0];
-			for (;;) {
-				const pointer = curl.multiInfoRead(multi, queued);
-				if (!pointer) break;
-				const message = curl.koffi.decode(
-					pointer,
-					curl.multiMessage as never,
-				) as {msg: number; data: {result: number}};
-				if (message.msg === CURLMSG_DONE) {
-					const result = message.data.result;
-					settle(() => resolve(result));
+class Connections {
+	private multi: unknown;
+	private readonly transfers = new Map<bigint, Transfer>();
+	private timer: NodeJS.Timeout | undefined;
+	private immediate: NodeJS.Immediate | undefined;
+	private closing = false;
+
+	constructor(private readonly curl: Libcurl) {}
+
+	run(
+		easy: unknown,
+		url: string,
+		signal: AbortSignal | undefined,
+	): Promise<number> {
+		const {curl} = this;
+		return new Promise<number>((resolve, reject) => {
+			if (!this.multi) {
+				this.multi = curl.multiInit();
+				this.closing = false;
+				if (!this.multi) {
+					this.multi = undefined;
+					reject(new SerpcastError('transport', 'curl_multi_init failed'));
 					return;
 				}
 			}
-			// Nothing finished: look again now if a socket is ready or libcurl
-			// wants to run at once, else after its own timeout, at most IDLE_POLL_MS.
-			const ready = [0];
-			const polled: number = curl.multiPoll(multi, null, 0, 0, ready);
-			if (polled !== 0) {
-				settle(() => reject(multiError('curl_multi_poll', polled)));
+			const added: number = curl.multiAdd(this.multi, easy);
+			if (added !== 0) {
+				reject(this.multiError(url, 'curl_multi_add_handle', added));
+				this.release();
 				return;
 			}
-			const wait = [0];
-			curl.multiTimeout(multi, wait);
-			const due = wait[0]! < 0 ? IDLE_POLL_MS : wait[0]!;
-			schedule(ready[0]! > 0 ? 0 : Math.min(due, IDLE_POLL_MS));
+			const transfer: Transfer = {
+				easy,
+				url,
+				signal,
+				onAbort: () => this.schedule(0),
+				resolve,
+				reject,
+			};
+			this.transfers.set(address(curl, easy), transfer);
+			signal?.addEventListener('abort', transfer.onAbort, {once: true});
+			this.schedule(0);
+		});
+	}
+
+	/** Close the connections now if idle, else as soon as the requests in flight settle. */
+	close(): void {
+		this.closing = true;
+		this.release();
+	}
+
+	private multiError(url: string, call: string, code: number) {
+		return new SerpcastError(
+			'transport',
+			`request to ${url} failed: ${call}: ${this.curl.multiStrerror(code)} (curlm ${code})`,
+		);
+	}
+
+	private cancel() {
+		if (this.timer) clearTimeout(this.timer);
+		if (this.immediate) clearImmediate(this.immediate);
+		this.timer = this.immediate = undefined;
+	}
+
+	private schedule(ms: number) {
+		this.cancel();
+		if (ms <= 0) this.immediate = setImmediate(() => this.tick());
+		else this.timer = setTimeout(() => this.tick(), ms);
+	}
+
+	private settle(transfer: Transfer, done: (t: Transfer) => void) {
+		this.transfers.delete(address(this.curl, transfer.easy));
+		transfer.signal?.removeEventListener('abort', transfer.onAbort);
+		this.curl.multiRemove(this.multi, transfer.easy);
+		done(transfer);
+	}
+
+	/** With nothing in flight: stop looking, and drop the multi handle if closing. */
+	private release() {
+		if (this.transfers.size > 0) return;
+		this.cancel();
+		if (this.closing && this.multi) {
+			this.curl.multiCleanup(this.multi);
+			this.multi = undefined;
 		}
-		signal?.addEventListener('abort', onAbort, {once: true});
-		tick();
-	});
+		this.closing = false;
+	}
+
+	private tick() {
+		this.timer = this.immediate = undefined;
+		try {
+			this.step();
+		} catch (error) {
+			for (const transfer of [...this.transfers.values()])
+				this.settle(transfer, (t) => t.reject(error));
+		}
+		this.release();
+	}
+
+	private step() {
+		const {curl} = this;
+		for (const transfer of [...this.transfers.values()]) {
+			if (transfer.signal?.aborted)
+				this.settle(transfer, (t) => t.reject(t.signal!.reason));
+		}
+		if (this.transfers.size === 0) return;
+		const running = [0];
+		const performed: number = curl.multiPerform(this.multi, running);
+		if (performed !== 0) {
+			for (const transfer of [...this.transfers.values()]) {
+				this.settle(transfer, (t) =>
+					t.reject(this.multiError(t.url, 'curl_multi_perform', performed)),
+				);
+			}
+			return;
+		}
+		const queued = [0];
+		for (;;) {
+			const pointer = curl.multiInfoRead(this.multi, queued);
+			if (!pointer) break;
+			const message = curl.koffi.decode(
+				pointer,
+				curl.multiMessage as never,
+			) as {msg: number; easy: unknown; data: {result: number}};
+			if (message.msg !== CURLMSG_DONE) continue;
+			const transfer = this.transfers.get(address(curl, message.easy));
+			const result = message.data.result;
+			if (transfer) this.settle(transfer, (t) => t.resolve(result));
+		}
+		if (this.transfers.size === 0) return;
+		// Something is still in flight: look again now if a socket is ready or
+		// libcurl wants to run at once, else after its own timeout, at most
+		// IDLE_POLL_MS.
+		const ready = [0];
+		const polled: number = curl.multiPoll(this.multi, null, 0, 0, ready);
+		if (polled !== 0) {
+			for (const transfer of [...this.transfers.values()]) {
+				this.settle(transfer, (t) =>
+					t.reject(this.multiError(t.url, 'curl_multi_poll', polled)),
+				);
+			}
+			return;
+		}
+		const wait = [0];
+		curl.multiTimeout(this.multi, wait);
+		const due = wait[0]! < 0 ? IDLE_POLL_MS : wait[0]!;
+		this.schedule(ready[0]! > 0 ? 0 : Math.min(due, IDLE_POLL_MS));
+	}
+}
+
+function address(curl: Libcurl, pointer: unknown): bigint {
+	return BigInt(curl.koffi.address(pointer as never));
 }

@@ -63,7 +63,7 @@ One engine's cookies and arbitrary JSON state, kept in the state store and dropp
 _Avoid_: cookie jar, identity
 
 **Transport session**:
-The cookies that one engine's requests share, stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it. It is the cookie half of a Session, exported as plain JSON so the state store can keep it.
+The cookies and open connections that one engine's requests share. Cookies are stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it; they are the cookie half of a Session, exported as plain JSON so the state store can keep it. Connections are kept open between its requests (as Chrome does) and never shared with another transport session; they live only in memory, closed with `close()` or when the engine chain drops the Session.
 _Avoid_: cookie jar, client
 
 **Cooldown**:

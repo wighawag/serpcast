@@ -56,10 +56,9 @@ describe.skipIf(!LIB)('code recipes (native libcurl-impersonate)', () => {
 		expect(response.results).toEqual([
 			{title: 'One', url: 'https://one.example/'},
 		]);
-		expect(proxy.requests).toEqual([
-			{host: 'localhost', port: server.port},
-			{host: 'localhost', port: server.port},
-		]);
+		// Both requests go through ONE tunnel: the engine's session reuses its
+		// connection (session-connection-reuse).
+		expect(proxy.requests).toEqual([{host: 'localhost', port: server.port}]);
 		const names = (raw: string[]) =>
 			raw.filter((_, i) => i % 2 === 0 && !raw[i]!.startsWith(':'));
 		const api = seen.find((s) => s.path === '/api?q=x')!;

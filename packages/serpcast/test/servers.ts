@@ -18,6 +18,8 @@ export interface H2Server {
 	port: number;
 	/** Every TCP connection accepted. */
 	connections: number;
+	/** The TCP connections still open. */
+	open: number;
 	/** The raw bytes each connection's client sent (decrypted). */
 	received: Buffer[][];
 	close(): Promise<void>;
@@ -35,6 +37,7 @@ export async function startH2Server(
 	const server: H2Server = {
 		port: 0,
 		connections: 0,
+		open: 0,
 		received: [],
 		close: async () => {},
 	};
@@ -69,8 +72,15 @@ export async function startH2Server(
 	);
 	tlsServer.on('connection', (socket) => {
 		server.connections++;
+		server.open++;
+		// As real servers do: with Nagle on, a response's second frame on a
+		// reused connection waits for the client's delayed ACK (about 40 ms).
+		socket.setNoDelay(true);
 		sockets.add(socket);
-		socket.on('close', () => sockets.delete(socket));
+		socket.on('close', () => {
+			server.open--;
+			sockets.delete(socket);
+		});
 	});
 	await new Promise<void>((resolve) => tlsServer.listen(0, resolve));
 	server.port = (tlsServer.address() as net.AddressInfo).port;
@@ -84,7 +94,13 @@ export async function startH2Server(
 
 /** The first HTTP/2 HEADERS frame a client sent: flags and priority fields. */
 export function firstHeadersFrame(bytes: Buffer[]) {
+	return headersFrames(bytes)[0];
+}
+
+/** Every HTTP/2 HEADERS frame a client sent on one connection, in order: stream, flags and priority fields. */
+export function headersFrames(bytes: Buffer[]) {
 	const data = Buffer.concat(bytes);
+	const frames = [];
 	let offset = 24; // client connection preface
 	while (offset + 9 <= data.length) {
 		const length = data.readUIntBE(offset, 3);
@@ -94,16 +110,17 @@ export function firstHeadersFrame(bytes: Buffer[]) {
 			let p = offset + 9;
 			if (flags & 0x8) p += 1; // PADDED
 			const priority = flags & 0x20;
-			return {
+			frames.push({
+				stream: data.readUInt32BE(offset + 5) & 0x7fffffff,
 				flags,
 				length,
 				exclusive: priority ? data[p]! >> 7 === 1 : undefined,
 				weight: priority ? data[p + 4]! + 1 : undefined,
-			};
+			});
 		}
 		offset += 9 + length;
 	}
-	return undefined;
+	return frames;
 }
 
 export interface RecordingProxy {

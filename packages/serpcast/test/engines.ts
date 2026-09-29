@@ -6,12 +6,12 @@
 import {parseRecipe, type Recipe} from 'serpcast-recipe';
 import {
 	CookieStore,
+	type ChainTransport,
 	createMemoryStore,
 	type JsonValue,
 	type RequestOptions,
 	type StateStore,
 	type StoredCookie,
-	type Transport,
 	type TransportResponse,
 } from '../src/index.js';
 import {item, resultsPage} from './pages.js';
@@ -70,7 +70,7 @@ export function fakeTransport(
 	{proxy}: {proxy?: string} = {},
 ) {
 	const requests: FakeRequest[] = [];
-	const transport: Pick<Transport, 'session'> = {
+	const transport: ChainTransport = {
 		session(saved?: readonly StoredCookie[]) {
 			const jar = new CookieStore(saved);
 			return {

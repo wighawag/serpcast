@@ -129,7 +129,7 @@ type Fn = (...args: any[]) => any;
 /**
  * The loaded library and the functions serpcast calls. Every call is
  * synchronous, on the main thread: requests are driven through the multi
- * interface (see `drive` in transport.ts), never with `curl_easy_perform` on a
+ * interface (see `Connections` in transport.ts), never with `curl_easy_perform` on a
  * worker thread, whose JS callbacks deadlocked `process.exit()`.
  */
 export interface Libcurl {

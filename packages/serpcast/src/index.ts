@@ -12,6 +12,7 @@ export {
 	DEFAULT_COOLDOWN_MS,
 	DEFAULT_SESSION_IDLE_MS,
 	createSerpcast,
+	type ChainTransport,
 	type Engine,
 	type SearchOptions,
 	type SearchResponse,

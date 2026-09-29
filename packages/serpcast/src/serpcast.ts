@@ -22,6 +22,18 @@
 // Browser engines (browser.ts) run in searchcast: they have no transport
 // session (the browser keeps its own cookies), and `close()` stops the
 // library-mode browser.
+//
+// Connections: the instance keeps each HTTP engine's transport session (and so
+// its open connections) in memory between searches, so the next search reuses
+// them. It is reused only while the stored session is fresh AND its cookies
+// are still the stored ones (a store shared with another instance may have
+// moved on), and not by two searches at once; otherwise a new one is made from
+// the store. Its connections are closed when the engine's session is dropped:
+// idle expiry (checked at the next search, and by an unref'd timer after
+// `sessionIdleMs` without use), `clearSessions()`, or `close()`. The store
+// stays the only source of cookies and state. Connections are never shared
+// between engines (a transport session never shares them).
+// Decisions: work/notes/observations/session-connection-reuse-decisions.md.
 // Decisions and alternatives: work/notes/observations/engine-chain-and-state-decisions.md.
 
 import type {Recipe} from 'serpcast-recipe';
@@ -38,12 +50,23 @@ import {SerpcastError, type EngineFailure} from './errors.js';
 import {createMemoryStore, type JsonValue, type StateStore} from './store.js';
 import {
 	createTransport,
-	type Transport,
 	type TransportOptions,
+	type TransportSession,
 } from './transport.js';
 
 /** One engine of a chain, identified by its name: a declarative recipe, a code recipe or a browser engine. */
 export type Engine = Recipe | CodeRecipe | BrowserEngine;
+
+/**
+ * What the chain needs of a transport. `close` on a session is optional so a
+ * transport injected before sessions had it keeps working; without it the
+ * chain just drops the session.
+ */
+export interface ChainTransport {
+	session(
+		cookies?: readonly StoredCookie[],
+	): Omit<TransportSession, 'close'> & Partial<Pick<TransportSession, 'close'>>;
+}
 
 export interface SerpcastOptions extends TransportOptions {
 	/** Where sessions and cooldowns live. Default: in memory, per instance. */
@@ -55,7 +78,7 @@ export interface SerpcastOptions extends TransportOptions {
 	/** The clock for cooldowns and sessions (and the default store), in ms since the epoch. */
 	now?: () => number;
 	/** Use this transport instead of creating one from the transport options (tests, sharing). */
-	transport?: Pick<Transport, 'session'>;
+	transport?: ChainTransport;
 	/** How library-mode browser engines start searchcast (it gets `proxy` too). */
 	searchcast?: SearchcastLibraryOptions;
 }
@@ -82,7 +105,7 @@ export interface Serpcast {
 	search(query: string, options: SearchOptions): Promise<SearchResponse>;
 	/** Drop the session of `engine` (by name), or of every engine. */
 	clearSessions(engine?: string): Promise<void>;
-	/** Release what the instance holds. */
+	/** Release what the instance holds: every engine's connections, and the library-mode browser. */
 	close(): Promise<void>;
 }
 
@@ -108,6 +131,57 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	const idleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 	const browser = createBrowserRunner(options);
 
+	type Session = ReturnType<ChainTransport['session']>;
+	/** Each HTTP engine's live transport session, kept for its connections; `uses` counts searches running on it. */
+	const live = new Map<
+		string,
+		{session: Session; uses: number; timer?: NodeJS.Timeout}
+	>();
+	const drop = (name: string) => {
+		const entry = live.get(name);
+		if (!entry) return;
+		live.delete(name);
+		clearTimeout(entry.timer);
+		entry.session.close?.();
+	};
+	/**
+	 * Start using the engine's live session if it still holds exactly
+	 * `cookies`, else a new one made from them. A search that starts while
+	 * another runs on the same engine gets a session of its own (closed after),
+	 * so concurrent searches keep their own cookies, as before.
+	 */
+	const acquire = (name: string, cookies: readonly StoredCookie[]) => {
+		let entry = live.get(name);
+		if (entry && entry.uses > 0) return transport.session(cookies);
+		if (
+			!entry ||
+			JSON.stringify(entry.session.cookies()) !== JSON.stringify(cookies)
+		) {
+			drop(name);
+			entry = {session: transport.session(cookies), uses: 0};
+			live.set(name, entry);
+		}
+		clearTimeout(entry.timer);
+		entry.timer = undefined;
+		entry.uses++;
+		return entry.session;
+	};
+	/** Stop using `session`: close it if it was dropped meanwhile, else start its idle timer once unused. */
+	const release = (name: string, session: Session) => {
+		const entry = live.get(name);
+		if (entry?.session !== session) {
+			// A concurrent search's own session, or one dropped while in use
+			// (its last requests may have reopened connections).
+			session.close?.();
+			return;
+		}
+		if (--entry.uses > 0) return;
+		entry.timer = setTimeout(() => {
+			if (live.get(name) === entry) drop(name);
+		}, idleMs);
+		entry.timer.unref(); // an idle engine session never keeps the process alive
+	};
+
 	async function coolingUntil(engine: string): Promise<number | undefined> {
 		const record = (await store.get(key(engine, 'cooldown'))) as
 			{until?: unknown} | null | undefined;
@@ -127,7 +201,10 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 			Array.isArray(saved?.cookies) &&
 			typeof saved.lastUsed === 'number' &&
 			now() - saved.lastUsed < idleMs;
-		const session = transport.session(fresh ? saved!.cookies : []);
+		// Idle-expired or cleared elsewhere: a new session, so new connections
+		// (unless a concurrent search is using it; this one gets its own).
+		if (!fresh && !live.get(engine.name)?.uses) drop(engine.name);
+		const session = acquire(engine.name, fresh ? saved!.cookies! : []);
 		const kept = fresh ? saved!.state : undefined;
 		const state =
 			typeof kept === 'object' && kept !== null && !Array.isArray(kept)
@@ -144,6 +221,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 				: await runDeclarativeRecipe(engine, query, {session, signal});
 			return response.results;
 		} finally {
+			release(engine.name, session);
 			const record: SessionRecord = {
 				cookies: session.cookies(),
 				lastUsed: now(),
@@ -222,6 +300,8 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 			);
 		},
 		async clearSessions(engine) {
+			for (const name of engine === undefined ? [...live.keys()] : [engine])
+				drop(name);
 			const names = await sessionNames();
 			for (const name of engine === undefined ? names : [engine])
 				await store.delete(key(name, 'session'));
@@ -234,9 +314,10 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 				);
 			}
 		},
-		// HTTP engines hold no connection between requests; only a
-		// library-mode browser (and its temporary profile) is released.
+		// Every HTTP engine's connections, and a library-mode browser (and
+		// its temporary profile). Sessions stay in the store.
 		async close() {
+			for (const name of [...live.keys()]) drop(name);
 			await browser.close();
 		},
 	};
