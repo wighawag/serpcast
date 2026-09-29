@@ -34,6 +34,10 @@ export interface FakeRequest {
 	/** The request kind (selects the header table) and its referer. */
 	kind: RequestOptions['kind'];
 	referer?: string;
+	/** Only for a POST: the method, its body (as text) and content type. */
+	method?: 'POST';
+	body?: string;
+	contentType?: string;
 	/** The fake transport's proxy: every request of one transport carries it. */
 	proxy?: string;
 }
@@ -90,6 +94,16 @@ export function fakeTransport(
 						cookie: jar.header(target),
 						kind: options.kind,
 						...(options.referer && {referer: options.referer}),
+						...(options.method === 'POST' && {
+							method: 'POST' as const,
+							body:
+								typeof options.body === 'string'
+									? options.body
+									: new TextDecoder().decode(options.body),
+							...(options.contentType !== undefined && {
+								contentType: options.contentType,
+							}),
+						}),
 						...(proxy && {proxy}),
 					};
 					requests.push(request);

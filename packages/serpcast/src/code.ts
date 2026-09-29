@@ -1,6 +1,7 @@
 // Code recipes: a JS module, loaded only from the path the caller gives, whose
 // default export is `{name, search(query, ctx), timeoutMs?, decoyProne?}`. The context is
-// the only capability serpcast hands it: `http` (GET through this engine's
+// the only capability serpcast hands it: `http` (GET, and POST as a page's
+// `fetch`, through this engine's
 // transport session, so the caller's proxy, the pinned fingerprint and the
 // session cookies all apply), `session` (JSON state kept with the cookies),
 // `signal`, `maxResults` and the `blocked`/`recipeError` helpers. A module can
@@ -15,6 +16,9 @@
 // - `http.text`/`http.json` map statuses as the declarative runner does
 //   (202/403/429 `blocked`, 404/410 `recipe`, other non-2xx `transport`) and
 //   follow no redirects; `http.get` returns the raw response.
+// - `http.post` is a page's `fetch()` POST (and the CORS preflight Chrome
+//   would send first, see transport.ts); it returns the raw response, and
+//   `http.postJson` sends a value as JSON and parses the answer like `json`.
 // Decisions and alternatives: work/notes/observations/code-recipes-decisions.md.
 
 import {resolve} from 'node:path';
@@ -25,19 +29,24 @@ import type {SearchResult} from './declarative.js';
 import {SerpcastError} from './errors.js';
 import type {JsonValue} from './store.js';
 import type {
+	PostOptions,
 	RequestOptions,
 	TransportResponse,
 	TransportSession,
 } from './transport.js';
 
-/** A request made by a code recipe: the transport's options, without the signal (the context's). */
-export type HttpOptions = RequestOptions extends infer O
-	? O extends RequestOptions
-		? Omit<O, 'signal'>
-		: never
-	: never;
+/** A GET made by a code recipe: the transport's options, without the signal (the context's) or a method. */
+export type HttpOptions =
+	Exclude<RequestOptions, PostOptions> extends infer O
+		? O extends RequestOptions
+			? Omit<O, 'signal' | 'method'>
+			: never
+		: never;
 
-/** GET through this engine's transport session (the only HTTP a code recipe is given). */
+/** A POST made by a code recipe (a page's `fetch()`): `body` is a string or bytes, `contentType` defaults as `fetch()` does. */
+export type HttpPostOptions = Omit<PostOptions, 'method'>;
+
+/** GET and POST through this engine's transport session (the only HTTP a code recipe is given). */
 export interface CodeRecipeHttp {
 	/** The raw response, whatever its status (redirects are not followed). */
 	get(url: string, options: HttpOptions): Promise<TransportResponse>;
@@ -45,6 +54,17 @@ export interface CodeRecipeHttp {
 	text(url: string, options: HttpOptions): Promise<string>;
 	/** The body parsed as JSON (invalid JSON is a `recipe` error); statuses as for `text`. */
 	json(url: string, options: HttpOptions): Promise<unknown>;
+	/** A `fetch` POST; the raw response, whatever its status. */
+	post(url: string, options: HttpPostOptions): Promise<TransportResponse>;
+	/**
+	 * POST `value` as JSON (`content-type: application/json` unless
+	 * `options.contentType` says otherwise) and parse the answer as `json` does.
+	 */
+	postJson(
+		url: string,
+		value: unknown,
+		options: Omit<HttpPostOptions, 'body'>,
+	): Promise<unknown>;
 }
 
 /** This engine's JSON state, kept in the state store with its cookies and dropped with them. */
@@ -214,7 +234,32 @@ function http(
 				`${name}: request kind must be one of ${REQUEST_KINDS.join(', ')}`,
 			);
 		}
-		return session.request(url, {...options, signal} as RequestOptions);
+		// `method` is forced: a GET stays a GET whatever a JS caller passes.
+		return session.request(url, {
+			...options,
+			method: 'GET',
+			signal,
+		} as RequestOptions);
+	};
+	const post = async (url: string, options: HttpPostOptions) => {
+		if (options?.kind !== 'fetch') {
+			throw new SerpcastError(
+				'recipe',
+				`${name}: a POST must be a fetch request (kind: 'fetch')`,
+			);
+		}
+		return session.request(url, {...options, method: 'POST', signal});
+	};
+	const parse = async (url: string, response: TransportResponse) => {
+		checkStatus(name, response);
+		const body = response.text();
+		try {
+			return JSON.parse(body) as unknown;
+		} catch (cause) {
+			throw new SerpcastError('recipe', `${name}: not JSON from ${url}`, {
+				cause,
+			});
+		}
 	};
 	const text = async (url: string, options: HttpOptions) => {
 		const response = await get(url, options);
@@ -224,15 +269,22 @@ function http(
 	return {
 		get,
 		text,
-		async json(url, options) {
-			const body = await text(url, options);
-			try {
-				return JSON.parse(body) as unknown;
-			} catch (cause) {
-				throw new SerpcastError('recipe', `${name}: not JSON from ${url}`, {
-					cause,
-				});
+		json: async (url, options) => parse(url, await get(url, options)),
+		post,
+		async postJson(url, value, options) {
+			const body = JSON.stringify(value);
+			if (body === undefined) {
+				throw new SerpcastError(
+					'recipe',
+					`${name}: postJson value is not JSON-serializable`,
+				);
 			}
+			const response = await post(url, {
+				...options,
+				contentType: options?.contentType ?? 'application/json',
+				body,
+			});
+			return parse(url, response);
 		},
 	};
 }

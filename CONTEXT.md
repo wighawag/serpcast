@@ -45,8 +45,12 @@ The exact request headers (names, values, order) that the pinned Chrome sends fo
 _Avoid_: default headers, user agent
 
 **Request kind**:
-What a request is, from the browser's point of view, which selects its header table: document navigation, same-origin navigation, fetch/XHR, or script.
+What a request is, from the browser's point of view, which selects its header table: document navigation, same-origin navigation, fetch/XHR, or script. Only a fetch may be a POST.
 _Avoid_: request type, mode
+
+**Preflight**:
+The CORS `OPTIONS` request Chrome sends before a fetch POST to another origin whose `content-type` is not CORS-safelisted (such as `application/json`). serpcast sends it too, as captured: credential-less, on the transport session's credential-less connections, remembered for its `access-control-max-age`. If it does not allow the POST, the POST is not sent.
+_Avoid_: OPTIONS check, CORS probe
 
 **Fetch site**:
 How a `fetch` or `script` request relates to the page it comes from (its referer): `same-origin`, `same-site` (same scheme and registrable domain, any port) or `cross-site`, Chrome's `sec-fetch-site`. Derived from the URLs by a small built-in site rule (no public suffix list), overridable per request with `fetchSite`; it also decides the referer (the page's origin only, when not same-origin), `origin` and `sec-fetch-storage-access`.
@@ -67,7 +71,7 @@ One engine's cookies and arbitrary JSON state, kept in the state store and dropp
 _Avoid_: cookie jar, identity
 
 **Transport session**:
-The cookies and open connections that one engine's requests share. Cookies are stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it; they are the cookie half of a Session, exported as plain JSON so the state store can keep it. Connections are kept open between its requests (as Chrome does) and never shared with another transport session; they live only in memory, closed with `close()` or when the engine chain drops the Session.
+The cookies and open connections that one engine's requests share. Cookies are stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it; they are the cookie half of a Session, exported as plain JSON so the state store can keep it. Connections are kept open between its requests (as Chrome does) and never shared with another transport session; they live only in memory, closed with `close()` or when the engine chain drops the Session. Preflights go on a second, credential-less set of connections of the same transport session, as Chrome keeps credential-less requests apart.
 _Avoid_: cookie jar, client
 
 **Cooldown**:

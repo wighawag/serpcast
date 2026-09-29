@@ -7,8 +7,10 @@
 // (net-log capture of real Chromium on Linux, 2026-09-28; order and per-kind
 // structure), with branded Chrome values on Linux. Same-site and cross-site
 // `fetch` and `script`: work/notes/findings/sec-fetch-site-by-initiator.md
-// (2026-09-29). Not measured, so not offered: navigations to another origin,
-// POST, non-English `accept-language`.
+// (2026-09-29). POST `fetch` and its CORS preflight:
+// work/notes/findings/post-requests.md (2026-09-29). Not measured, so not
+// offered: navigations to another origin, navigation (form) POST,
+// non-English `accept-language`.
 
 import {SerpcastError} from './errors.js';
 
@@ -159,6 +161,82 @@ function pageUrl(kind: RequestKind, referer: string): URL {
 	}
 }
 
+/** The request methods serpcast sends; `POST` only for the `fetch` kind. */
+export type RequestMethod = 'GET' | 'POST';
+
+/** The `content-type` Chrome's `fetch()` gives a string body sent without one. */
+export const TEXT_BODY_CONTENT_TYPE = 'text/plain;charset=UTF-8';
+
+const SAFELISTED_CONTENT_TYPES = new Set([
+	'application/x-www-form-urlencoded',
+	'multipart/form-data',
+	'text/plain',
+]);
+
+/**
+ * Whether a `content-type` value is CORS-safelisted (the Fetch standard's
+ * "CORS-safelisted request-header"): at most 128 bytes, no CORS-unsafe byte,
+ * and a MIME essence of `application/x-www-form-urlencoded`,
+ * `multipart/form-data` or `text/plain`. A cross-origin POST with any other
+ * `content-type` is preflighted.
+ */
+export function isSafelistedContentType(value: string): boolean {
+	if (new TextEncoder().encode(value).length > 128) return false;
+	if (/[\x00-\x08\x0a-\x1f"():<>?@[\\\]{}\x7f]/.test(value)) return false;
+	const essence = value.split(';')[0]!.trim().toLowerCase();
+	return SAFELISTED_CONTENT_TYPES.has(essence);
+}
+
+/** The `sec-fetch-site` of a `fetch`/`script` request (see `headerTable`). */
+function siteOf(
+	kind: RequestKind,
+	context: {referer: string; url?: string | URL; fetchSite?: FetchSite},
+): FetchSite {
+	return (
+		context.fetchSite ??
+		(context.url === undefined
+			? 'same-origin'
+			: fetchSite(context.url, pageUrl(kind, context.referer)))
+	);
+}
+
+/**
+ * The CORS preflight (`OPTIONS`) Chrome sends before a `fetch` POST, or
+ * `undefined` when it sends none: only a request that is not same-origin
+ * and whose `content-type` is not CORS-safelisted (`isSafelistedContentType`)
+ * is preflighted, since serpcast sends no other author header. Chrome sends
+ * it without credentials (no cookie, no `sec-fetch-storage-access`, and on a
+ * connection of its own), with no client hints, and asks only for
+ * `content-type`. Source: work/notes/findings/post-requests.md.
+ */
+export function preflightTable(context: {
+	referer: string;
+	url?: string | URL;
+	fetchSite?: FetchSite;
+	contentType?: string;
+}): HeaderTable | undefined {
+	const {contentType} = context;
+	if (contentType === undefined || isSafelistedContentType(contentType))
+		return undefined;
+	const site = siteOf('fetch', context);
+	if (site === 'same-origin') return undefined;
+	const origin = pageUrl('fetch', context.referer).origin;
+	return [
+		['accept', '*/*'],
+		['access-control-request-method', 'POST'],
+		['access-control-request-headers', 'content-type'],
+		['origin', origin],
+		['user-agent', UA],
+		['sec-fetch-mode', 'cors'],
+		['sec-fetch-site', site],
+		['sec-fetch-dest', 'empty'],
+		['referer', `${origin}/`],
+		['accept-encoding', ACCEPT_ENCODING],
+		['accept-language', ACCEPT_LANGUAGE],
+		['priority', 'u=1, i'],
+	];
+}
+
 /**
  * The exact headers Chrome sends for `kind`, in order. `cookie` (when the
  * session has any) goes where Chrome puts it: after `accept-language`, before
@@ -172,6 +250,11 @@ function pageUrl(kind: RequestKind, referer: string): URL {
  * `sec-fetch-storage-access: active` (a credentialed request, as serpcast
  * always sends the session's cookies). `same-origin-navigation` is always
  * same-origin and `document` always `none`.
+ *
+ * `method: 'POST'` (`fetch` only) is Chrome's `fetch(url, {method: 'POST',
+ * body, credentials: 'include'})`: `content-length` first, `content-type`
+ * (when there is one) between `sec-ch-ua` and `sec-ch-ua-mobile`, and
+ * `origin` ALWAYS, same-origin included (work/notes/findings/post-requests.md).
  */
 export function headerTable(
 	kind: RequestKind,
@@ -182,9 +265,22 @@ export function headerTable(
 		url?: string | URL;
 		/** Overrides the derived `sec-fetch-site` (`fetch` and `script` only). */
 		fetchSite?: FetchSite;
+		/** Default `GET`. */
+		method?: RequestMethod;
+		/** A POST's `content-type`, if it has one. */
+		contentType?: string;
+		/** A POST's body length in bytes. Default 0. */
+		contentLength?: number;
 	},
 ): HeaderTable {
 	const {referer, cookie} = context;
+	const post = context.method === 'POST';
+	if (post && kind !== 'fetch') {
+		throw new SerpcastError(
+			'recipe',
+			`a POST must be a fetch request, not ${kind}`,
+		);
+	}
 	if (kind !== 'document' && !referer) {
 		throw new SerpcastError(
 			'recipe',
@@ -225,20 +321,33 @@ export function headerTable(
 			...tail('u=0, i'),
 		];
 	}
-	const site =
-		context.fetchSite ??
-		(context.url === undefined
-			? 'same-origin'
-			: fetchSite(context.url, pageUrl(kind, referer!)));
+	const site = siteOf(kind, {...context, referer: referer!});
 	const origin = site === 'same-origin' ? '' : pageUrl(kind, referer!).origin;
+	const contentType = context.contentType;
 	return [
+		...(post
+			? [
+					['content-length', String(context.contentLength ?? 0)] as [
+						string,
+						string,
+					],
+				]
+			: []),
 		['sec-ch-ua-platform', '"Linux"'],
 		['user-agent', UA],
 		['sec-ch-ua', SEC_CH_UA],
+		...(post && contentType !== undefined
+			? [['content-type', contentType] as [string, string]]
+			: []),
 		['sec-ch-ua-mobile', '?0'],
 		['accept', '*/*'],
-		...(kind === 'fetch' && origin
-			? [['origin', origin] as [string, string]]
+		...(kind === 'fetch' && (origin || post)
+			? [
+					['origin', origin || pageUrl(kind, referer!).origin] as [
+						string,
+						string,
+					],
+				]
 			: []),
 		['sec-fetch-site', site],
 		['sec-fetch-mode', kind === 'fetch' ? 'cors' : 'no-cors'],

@@ -1,5 +1,11 @@
 import {describe, expect, it} from 'vitest';
-import {fetchSite, registrableDomain, secChUa} from '../src/chrome.js';
+import {
+	fetchSite,
+	isSafelistedContentType,
+	preflightTable,
+	registrableDomain,
+	secChUa,
+} from '../src/chrome.js';
 import {
 	CHROME_MAJOR,
 	headerTable,
@@ -352,5 +358,185 @@ describe('fetchSite derivation', () => {
 		expect(registrableDomain('www.example.co')).toBe('example.co');
 		expect(registrableDomain('localhost')).toBe('localhost');
 		expect(registrableDomain('192.168.1.2')).toBe('192.168.1.2');
+	});
+});
+
+// work/notes/findings/post-requests.md: `fetch(url, {method: 'POST', body,
+// credentials: 'include'})` from the page https://www.example.com:39383/page?q=x.
+describe('POST fetch tables and preflights (the finding post-requests)', () => {
+	const PAGE = 'https://www.example.com:39383/page?q=x';
+	const ORIGIN = 'https://www.example.com:39383';
+	const URLS = {
+		'same-origin': 'https://www.example.com:39383/api',
+		'same-site': 'https://cdn.example.com:39383/api',
+		'cross-site': 'https://www.example.net:39383/api',
+	} as const;
+	const BODIES = {
+		json: ['application/json', 15],
+		form: ['application/x-www-form-urlencoded', 7],
+	} as const;
+
+	const post = (
+		site: keyof typeof URLS,
+		[contentType, contentLength]: readonly [string, number],
+	): [string, string][] => [
+		['content-length', String(contentLength)],
+		['sec-ch-ua-platform', '"Linux"'],
+		['user-agent', UA],
+		['sec-ch-ua', SEC_CH_UA],
+		['content-type', contentType],
+		['sec-ch-ua-mobile', '?0'],
+		['accept', '*/*'],
+		['origin', ORIGIN],
+		['sec-fetch-site', site],
+		['sec-fetch-mode', 'cors'],
+		['sec-fetch-dest', 'empty'],
+		...(site === 'cross-site'
+			? [['sec-fetch-storage-access', 'active'] as [string, string]]
+			: []),
+		['referer', site === 'same-origin' ? PAGE : `${ORIGIN}/`],
+		['accept-encoding', 'gzip, deflate, br, zstd'],
+		['accept-language', 'en-US,en;q=0.9'],
+		['cookie', 'a=1'],
+		['priority', 'u=1, i'],
+	];
+
+	for (const site of ['same-origin', 'same-site', 'cross-site'] as const) {
+		for (const body of ['json', 'form'] as const) {
+			it(`POST ${body}, ${site}`, () => {
+				const [contentType, contentLength] = BODIES[body];
+				expect(
+					headerTable('fetch', {
+						referer: PAGE,
+						url: URLS[site],
+						cookie: 'a=1',
+						method: 'POST',
+						contentType,
+						contentLength,
+					}),
+				).toEqual(post(site, BODIES[body]));
+			});
+		}
+	}
+
+	it('literal: POST json, same-origin (origin is sent even same-origin)', () => {
+		expect(
+			headerTable('fetch', {
+				referer: PAGE,
+				url: URLS['same-origin'],
+				method: 'POST',
+				contentType: 'application/json',
+				contentLength: 15,
+			}),
+		).toEqual([
+			['content-length', '15'],
+			['sec-ch-ua-platform', '"Linux"'],
+			['user-agent', UA],
+			['sec-ch-ua', SEC_CH_UA],
+			['content-type', 'application/json'],
+			['sec-ch-ua-mobile', '?0'],
+			['accept', '*/*'],
+			['origin', ORIGIN],
+			['sec-fetch-site', 'same-origin'],
+			['sec-fetch-mode', 'cors'],
+			['sec-fetch-dest', 'empty'],
+			['referer', PAGE],
+			['accept-encoding', 'gzip, deflate, br, zstd'],
+			['accept-language', 'en-US,en;q=0.9'],
+			['priority', 'u=1, i'],
+		]);
+	});
+
+	it('a body without a content-type (bytes, or none) has no content-type header', () => {
+		const names = headerTable('fetch', {
+			referer: PAGE,
+			url: URLS['same-origin'],
+			method: 'POST',
+		}).map(([name]) => name);
+		expect(names).not.toContain('content-type');
+		expect(names.slice(0, 2)).toEqual(['content-length', 'sec-ch-ua-platform']);
+	});
+
+	it('a GET fetch is unchanged by POST support (no origin same-origin)', () => {
+		expect(
+			headerTable('fetch', {referer: PAGE, url: URLS['same-origin']}),
+		).toEqual(headerTable('fetch', {referer: PAGE}));
+	});
+
+	it('refuses a POST that is not fetch (recipe error)', () => {
+		for (const kind of [
+			'document',
+			'same-origin-navigation',
+			'script',
+		] as const)
+			expect(() =>
+				headerTable(kind, {referer: PAGE, method: 'POST'}),
+			).toThrowError(expect.objectContaining({kind: 'recipe'}));
+	});
+
+	it('preflight: JSON to another origin, same-site and cross-site alike (no hints, no cookie, no storage access)', () => {
+		for (const site of ['same-site', 'cross-site'] as const) {
+			expect(
+				preflightTable({
+					referer: PAGE,
+					url: URLS[site],
+					contentType: 'application/json',
+				}),
+			).toEqual([
+				['accept', '*/*'],
+				['access-control-request-method', 'POST'],
+				['access-control-request-headers', 'content-type'],
+				['origin', ORIGIN],
+				['user-agent', UA],
+				['sec-fetch-mode', 'cors'],
+				['sec-fetch-site', site],
+				['sec-fetch-dest', 'empty'],
+				['referer', `${ORIGIN}/`],
+				['accept-encoding', 'gzip, deflate, br, zstd'],
+				['accept-language', 'en-US,en;q=0.9'],
+				['priority', 'u=1, i'],
+			]);
+		}
+	});
+
+	it('no preflight same-origin, for a safelisted content-type, or without one', () => {
+		expect(
+			preflightTable({
+				referer: PAGE,
+				url: URLS['same-origin'],
+				contentType: 'application/json',
+			}),
+		).toBeUndefined();
+		for (const contentType of [
+			'application/x-www-form-urlencoded',
+			'text/plain;charset=UTF-8',
+			'multipart/form-data; boundary=x',
+			undefined,
+		]) {
+			expect(
+				preflightTable({referer: PAGE, url: URLS['cross-site'], contentType}),
+			).toBeUndefined();
+		}
+		expect(
+			preflightTable({
+				referer: PAGE,
+				url: URLS['cross-site'],
+				fetchSite: 'same-origin',
+				contentType: 'application/json',
+			}),
+		).toBeUndefined();
+	});
+
+	it('isSafelistedContentType (the Fetch standard)', () => {
+		expect(isSafelistedContentType('text/plain')).toBe(true);
+		expect(isSafelistedContentType(' Text/Plain ; charset=utf-8')).toBe(true);
+		expect(isSafelistedContentType('application/x-www-form-urlencoded')).toBe(
+			true,
+		);
+		expect(isSafelistedContentType('application/json')).toBe(false);
+		expect(isSafelistedContentType('text/plain; charset="utf-8"')).toBe(false);
+		expect(isSafelistedContentType(`text/plain;${'x'.repeat(120)}`)).toBe(
+			false,
+		);
 	});
 });

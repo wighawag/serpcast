@@ -28,16 +28,28 @@
 // `curl_easy_perform` on a worker thread (koffi `.async`) deadlocked
 // `process.exit()`: the worker waited for the main thread to run its JS
 // callbacks while exit waited for the worker.
+//
+// POST: only for the `fetch` kind, sent as Chrome's `fetch()` POST (header
+// table in chrome.ts). When Chrome would send a CORS preflight first (another
+// origin, a `content-type` that is not CORS-safelisted), the session sends it
+// too, as Chrome does: without cookies, on a connection of its own (Chrome
+// keeps credential-less requests off the credentialed connection), and
+// remembers a successful one for its `access-control-max-age` (default 5 s)
+// per page origin and URL. A preflight the server does not allow stops the
+// POST, as in the browser. Decisions:
+// work/notes/observations/2026-09-29-post-requests-decisions.md.
 
 import {DEFAULT_TIMEOUT_MS} from 'serpcast-recipe';
 import {
 	headerTable,
 	IMPERSONATE_TARGET,
+	preflightTable,
 	type FetchSite,
 	type RequestKind,
 } from './chrome.js';
 import {CookieStore, type StoredCookie} from './cookies.js';
 import {SerpcastError} from './errors.js';
+import {checkPreflight, postBody, type PostOptions} from './post.js';
 import {respond, type TransportResponse} from './response.js';
 import {
 	assertImpersonation,
@@ -74,12 +86,29 @@ export interface TransportOptions {
  * `github.io`, see `registrableDomain`).
  */
 export type RequestOptions = {signal?: AbortSignal; timeoutMs?: number} & (
-	| {kind: 'document'; referer?: undefined; fetchSite?: undefined}
-	| {kind: 'same-origin-navigation'; referer: string; fetchSite?: undefined}
-	| {kind: 'fetch' | 'script'; referer: string; fetchSite?: FetchSite}
+	| {
+			kind: 'document';
+			referer?: undefined;
+			fetchSite?: undefined;
+			method?: 'GET';
+	  }
+	| {
+			kind: 'same-origin-navigation';
+			referer: string;
+			fetchSite?: undefined;
+			method?: 'GET';
+	  }
+	| {
+			kind: 'fetch' | 'script';
+			referer: string;
+			fetchSite?: FetchSite;
+			method?: 'GET';
+	  }
+	| PostOptions
 );
 
 export type {TransportResponse};
+export {MAX_REQUEST_BODY_BYTES, type PostOptions} from './post.js';
 
 /** What `check()` found. */
 export interface LibraryInfo {
@@ -118,6 +147,10 @@ const OPT = {
 	URL: 10002,
 	PROXY: 10004,
 	ERRORBUFFER: 10010,
+	POST: 47,
+	CUSTOMREQUEST: 10036,
+	COPYPOSTFIELDS: 10165,
+	POSTFIELDSIZE_LARGE: 30120,
 	WRITEFUNCTION: 20011,
 	HTTPHEADER: 10023,
 	CAINFO: 10065,
@@ -176,20 +209,62 @@ export function createTransport(options: TransportOptions = {}): Transport {
 		session(saved) {
 			const jar = new CookieStore(saved);
 			let connections: Connections | undefined;
+			// Credential-less requests (CORS preflights) use their own
+			// connections, as Chrome's do.
+			let anonymous: Connections | undefined;
+			/** Allowed preflights: `<page origin> <url>` to expiry (ms). */
+			const preflights = new Map<string, number>();
 			return {
 				cookies: () => jar.list(),
 				clearCookies: () => jar.clear(),
-				close: () => connections?.close(),
+				close: () => {
+					connections?.close();
+					anonymous?.close();
+				},
 				async request(url, request) {
 					const target = parseUrl(url);
+					const post = postBody(request);
 					const table = headerTable(request.kind, {
 						referer: request.referer,
 						url: target,
 						fetchSite: request.fetchSite,
 						cookie: jar.header(target),
+						...(post && {
+							method: 'POST',
+							contentType: post.contentType,
+							contentLength: post.body.length,
+						}),
 					});
+					const preflight =
+						post &&
+						preflightTable({
+							referer: request.referer!,
+							url: target,
+							fetchSite: request.fetchSite,
+							contentType: post.contentType,
+						});
 					request.signal?.throwIfAborted();
 					const {curl, info} = await check();
+					if (preflight) {
+						const origin = new URL(request.referer!).origin;
+						const key = `${origin} ${target.href}`;
+						if (!((preflights.get(key) ?? 0) > Date.now())) {
+							preflights.delete(key);
+							anonymous ??= new Connections(curl);
+							const answer = await perform(
+								curl,
+								anonymous,
+								info.impersonating,
+								target.href,
+								preflight,
+								options,
+								request,
+								{method: 'OPTIONS'},
+							);
+							const age = checkPreflight(answer, origin);
+							if (age > 0) preflights.set(key, Date.now() + age * 1000);
+						}
+					}
 					connections ??= new Connections(curl);
 					const response = await perform(
 						curl,
@@ -199,6 +274,7 @@ export function createTransport(options: TransportOptions = {}): Transport {
 						table,
 						options,
 						request,
+						post ? {method: 'POST', body: post.body} : {method: 'GET'},
 					);
 					jar.store(target, response.headers.getSetCookie());
 					return response;
@@ -223,6 +299,9 @@ function parseUrl(url: string): URL {
 
 let proto: unknown;
 
+type Method =
+	{method: 'GET'} | {method: 'OPTIONS'} | {method: 'POST'; body: Uint8Array};
+
 async function perform(
 	curl: Libcurl,
 	connections: Connections,
@@ -231,6 +310,7 @@ async function perform(
 	table: [string, string][],
 	options: TransportOptions,
 	request: RequestOptions,
+	method: Method,
 ): Promise<TransportResponse> {
 	const {koffi} = curl;
 	proto ??= koffi.pointer(
@@ -270,9 +350,29 @@ async function perform(
 		}
 		for (const [name, value] of table)
 			list = curl.slistAppend(list, `${name}: ${value}`);
+		if (method.method === 'POST') {
+			// libcurl's own POST headers, off: the table has content-length and
+			// (when there is one) content-type; `Name:` removes a header.
+			for (const name of ['Content-Type', 'Expect'])
+				if (!table.some(([n]) => n.toLowerCase() === name.toLowerCase()))
+					list = curl.slistAppend(list, `${name}:`);
+		}
 		const set = (opt: number, type: unknown, value: unknown) =>
 			curl.setopt(handle, opt, type, value);
 		set(OPT.URL, 'str', url);
+		if (method.method === 'POST' && method.body.length === 0) {
+			// No body: a bodiless transfer named POST, so the HEADERS frame ends
+			// the stream (END_STREAM), as Chrome's does; libcurl's own POST
+			// would send an empty DATA frame after it.
+			set(OPT.CUSTOMREQUEST, 'str', 'POST');
+		} else if (method.method === 'POST') {
+			set(OPT.POST, 'long', 1);
+			set(OPT.POSTFIELDSIZE_LARGE, 'int64', method.body.length);
+			// Copied by libcurl at once, so the buffer need not outlive this call.
+			set(OPT.COPYPOSTFIELDS, 'void *', Buffer.from(method.body));
+		} else if (method.method === 'OPTIONS') {
+			set(OPT.CUSTOMREQUEST, 'str', 'OPTIONS');
+		}
 		set(OPT.HTTPHEADER, 'void *', list);
 		set(OPT.PROXY, 'str', options.proxy ?? '');
 		set(OPT.NOPROXY, 'str', '');

@@ -304,6 +304,140 @@ describe('code recipes: ctx.http goes through the transport', () => {
 	});
 });
 
+describe('code recipes: ctx.http.post and postJson', () => {
+	it('a loaded module posts JSON as a page fetch and reads the JSON answer, with the session cookies', async () => {
+		const path = module(`export default {
+			name: 'pow',
+			async search(query, ctx) {
+				const page = await ctx.http.get('https://pow.test/', {kind: 'document'});
+				const answer = await ctx.http.postJson(
+					'https://pow.test/api/answer',
+					{query, nonce: 42},
+					{kind: 'fetch', referer: page.url},
+				);
+				return answer.hits;
+			},
+		};`);
+		const {serpcast, requests} = setup({
+			pow: (request) =>
+				request.method === 'POST'
+					? json({hits: [{title: 'T', url: 'https://r.example/'}]})
+					: {body: '', setCookie: ['sid=1; Path=/']},
+		});
+		const response = await serpcast.search('q', {
+			engines: [await loadCodeRecipe(path)],
+		});
+		expect(response.results).toEqual([{title: 'T', url: 'https://r.example/'}]);
+		expect(requests[1]).toEqual({
+			engine: 'pow',
+			url: 'https://pow.test/api/answer',
+			kind: 'fetch',
+			referer: 'https://pow.test/',
+			cookie: 'sid=1',
+			method: 'POST',
+			body: '{"query":"q","nonce":42}',
+			contentType: 'application/json',
+		});
+	});
+
+	it('post sends the body and content type as given and returns the raw response; postJson keeps an explicit contentType', async () => {
+		const recipe = code('api', async (_, ctx) => {
+			const raw = await ctx.http.post('https://api.test/form', {
+				kind: 'fetch',
+				referer: 'https://api.test/',
+				body: 'a=1&b=x',
+				contentType: 'application/x-www-form-urlencoded',
+			});
+			await ctx.http.postJson('https://api.test/json', [1], {
+				kind: 'fetch',
+				referer: 'https://api.test/',
+				contentType: 'application/json;charset=UTF-8',
+			});
+			return [{title: String(raw.status), url: 'https://r.example/'}];
+		});
+		const {serpcast, requests} = setup({
+			api: (request) =>
+				request.url.endsWith('/form') ? {status: 403, body: ''} : json({}),
+		});
+		const {results} = await serpcast.search('q', {engines: [recipe]});
+		expect(results[0]!.title).toBe('403');
+		expect(requests.map((r) => [r.method, r.body, r.contentType])).toEqual([
+			['POST', 'a=1&b=x', 'application/x-www-form-urlencoded'],
+			['POST', '[1]', 'application/json;charset=UTF-8'],
+		]);
+	});
+
+	it.each([
+		[202, 'blocked'],
+		[403, 'blocked'],
+		[429, 'blocked'],
+		[404, 'recipe'],
+		[410, 'recipe'],
+		[302, 'transport'],
+		[500, 'transport'],
+	])('postJson maps HTTP %i to %s, like json', async (status, kind) => {
+		const recipe = code('api', async (_, ctx) => {
+			await ctx.http.postJson(
+				'https://api.test/',
+				{},
+				{
+					kind: 'fetch',
+					referer: 'https://api.test/',
+				},
+			);
+			return [];
+		});
+		const {serpcast} = setup({api: () => ({status, body: '{}'})});
+		const error = await onlyFailure(serpcast, recipe);
+		expect(error.kind).toBe(kind);
+		expect(error.message).toMatch(`HTTP ${status}`);
+	});
+
+	it('postJson: an answer that is not JSON, or a value that cannot be JSON, is a recipe error', async () => {
+		const {serpcast} = setup({api: () => ({body: '<html>challenge</html>'})});
+		const options = {kind: 'fetch', referer: 'https://api.test/'} as const;
+		const notJson = code('api', async (_, ctx) => {
+			await ctx.http.postJson('https://api.test/', {}, options);
+			return [];
+		});
+		expect((await onlyFailure(serpcast, notJson)).message).toMatch(/not JSON/);
+		const badValue = code('api', async (_, ctx) => {
+			await ctx.http.postJson('https://api.test/', undefined, options);
+			return [];
+		});
+		const error = await onlyFailure(serpcast, badValue);
+		expect(error.kind).toBe('recipe');
+		expect(error.message).toMatch(/not JSON-serializable/);
+	});
+
+	it('a POST whose kind is not fetch is a recipe error, before any request; get never POSTs', async () => {
+		const notFetch = code('api', async (_, ctx) => {
+			await ctx.http.post('https://api.test/', {
+				kind: 'document',
+				body: 'x',
+			} as never);
+			return [];
+		});
+		const {serpcast, requests} = setup({api: () => json([])});
+		const error = await onlyFailure(serpcast, notFetch);
+		expect(error.kind).toBe('recipe');
+		expect(error.message).toMatch(/fetch/);
+		expect(requests).toEqual([]);
+
+		const sneaky = code('api', async (_, ctx) => {
+			await ctx.http.get('https://api.test/', {
+				kind: 'fetch',
+				referer: 'https://api.test/',
+				method: 'POST',
+				body: 'x',
+			} as never);
+			return [];
+		});
+		await serpcast.search('q', {engines: [sneaky]});
+		expect(requests[0]!.method).toBeUndefined();
+	});
+});
+
 describe('code recipes: ctx.session', () => {
 	const counter = code('count', (_, ctx) => {
 		const n = ((ctx.session.get('n') as number | undefined) ?? 0) + 1;

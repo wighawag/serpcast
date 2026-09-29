@@ -18,10 +18,22 @@ const LIB = process.env.SERPCAST_LIBCURL_PATH;
 describe.skipIf(!LIB)('code recipes (native libcurl-impersonate)', () => {
 	let server: H2Server;
 	let proxy: RecordingProxy;
-	const seen: {path: string; headers: string[]}[] = [];
+	const seen: {path: string; headers: string[]; body?: string}[] = [];
 
 	beforeAll(async () => {
 		server = await startH2Server((req, res) => {
+			if (req.method === 'POST') {
+				const chunks: Buffer[] = [];
+				req.on('data', (c: Buffer) => chunks.push(c));
+				req.on('end', () => {
+					const body = Buffer.concat(chunks).toString();
+					seen.push({path: req.url, headers: req.rawHeaders, body});
+					const {query} = JSON.parse(body) as {query: string};
+					res.setHeader('content-type', 'application/json');
+					res.end(JSON.stringify([{title: query, url: 'https://p.example/'}]));
+				});
+				return;
+			}
 			seen.push({path: req.url, headers: req.rawHeaders});
 			if (req.url === '/') res.setHeader('set-cookie', 'sid=abc; Path=/');
 			res.setHeader('content-type', 'application/json');
@@ -69,5 +81,38 @@ describe.skipIf(!LIB)('code recipes (native libcurl-impersonate)', () => {
 		expect(names(api.headers)).toEqual(expected);
 		const cookie = api.headers[api.headers.indexOf('cookie') + 1];
 		expect(cookie).toBe('sid=abc');
+	});
+
+	it('postJson sends the captured POST table with the cookies and the JSON body, and parses the answer', async () => {
+		const origin = `https://localhost:${server.port}`;
+		const recipe: CodeRecipe = {
+			name: 'poster',
+			async search(query, ctx) {
+				await ctx.http.get(`${origin}/`, {kind: 'document'});
+				return (await ctx.http.postJson(
+					`${origin}/answer`,
+					{query},
+					{kind: 'fetch', referer: `${origin}/`},
+				)) as {title: string; url: string}[];
+			},
+		};
+		const serpcast = createSerpcast({libcurlPath: LIB, caPath: CA_PATH});
+		const response = await serpcast.search('hello', {engines: [recipe]});
+		expect(response.results).toEqual([
+			{title: 'hello', url: 'https://p.example/'},
+		]);
+		const post = seen.find((s) => s.path === '/answer')!;
+		expect(post.body).toBe('{"query":"hello"}');
+		expect(post.headers.slice(8)).toEqual(
+			headerTable('fetch', {
+				referer: `${origin}/`,
+				url: `${origin}/answer`,
+				cookie: 'sid=abc',
+				method: 'POST',
+				contentType: 'application/json',
+				contentLength: post.body!.length,
+			}).flat(),
+		);
+		await serpcast.close();
 	});
 });

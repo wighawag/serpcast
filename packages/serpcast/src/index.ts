@@ -33,9 +33,12 @@ export {
 	REQUEST_KINDS,
 	fetchSite,
 	headerTable,
+	isSafelistedContentType,
+	preflightTable,
 	type FetchSite,
 	type HeaderTable,
 	type RequestKind,
+	type RequestMethod,
 } from './chrome.js';
 export {
 	runDeclarativeRecipe,
@@ -52,6 +55,7 @@ export {
 	type CodeRecipeHttp,
 	type CodeRecipeSession,
 	type HttpOptions,
+	type HttpPostOptions,
 	type RunCodeRecipeOptions,
 } from './code.js';
 export {
@@ -70,8 +74,10 @@ export {
 	resolveLibraryPath,
 } from './libcurl.js';
 export {
+	MAX_REQUEST_BODY_BYTES,
 	createTransport,
 	type LibraryInfo,
+	type PostOptions,
 	type RequestOptions,
 	type Transport,
 	type TransportOptions,
