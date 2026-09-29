@@ -67,11 +67,11 @@ The caller-injected async key/value store with per-key expiry that holds session
 _Avoid_: cache, database
 
 **Session**:
-One engine's cookies and arbitrary JSON state, kept in the state store and dropped after an idle time or when cleared explicitly.
+One engine's cookies and arbitrary JSON state, kept in the state store and dropped after an idle time or when cleared explicitly. A code recipe reaches the cookies as a page's script would (`ctx.cookies`, `document.cookie` semantics: it can set, read and delete the non-`HttpOnly` ones) and the state through `ctx.session`.
 _Avoid_: cookie jar, identity
 
 **Transport session**:
-The cookies and open connections that one engine's requests share. Cookies are stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it; they are the cookie half of a Session, exported as plain JSON so the state store can keep it. Connections are kept open between its requests (as Chrome does) and never shared with another transport session; they live only in memory, closed with `close()` or when the engine chain drops the Session. Preflights go on a second, credential-less set of connections of the same transport session, as Chrome keeps credential-less requests apart.
+The cookies and open connections that one engine's requests share. Cookies are stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it; they are the cookie half of a Session, exported as plain JSON so the state store can keep it. Its `documentCookies` are the same cookies as a page's `document.cookie` sees them (what a code recipe's `ctx.cookies` uses). Connections are kept open between its requests (as Chrome does) and never shared with another transport session; they live only in memory, closed with `close()` or when the engine chain drops the Session. Preflights go on a second, credential-less set of connections of the same transport session, as Chrome keeps credential-less requests apart.
 _Avoid_: cookie jar, client
 
 **Cooldown**:

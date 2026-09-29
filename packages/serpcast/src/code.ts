@@ -3,8 +3,9 @@
 // the only capability serpcast hands it: `http` (GET, and POST as a page's
 // `fetch`, through this engine's
 // transport session, so the caller's proxy, the pinned fingerprint and the
-// session cookies all apply), `session` (JSON state kept with the cookies),
-// `signal`, `maxResults` and the `blocked`/`recipeError` helpers. A module can
+// session cookies all apply), `cookies` (those session cookies as the page's
+// `document.cookie` sees them: a recipe sets the cookie a site's script would,
+// see cookies.ts), `session` (JSON state kept with the cookies), `signal`, `maxResults` and the `blocked`/`recipeError` helpers. A module can
 // still import anything (it is code with full Node access), so which modules
 // are loaded is the caller's trust decision (ADR 0002).
 //
@@ -19,12 +20,14 @@
 // - `http.post` is a page's `fetch()` POST (and the CORS preflight Chrome
 //   would send first, see transport.ts); it returns the raw response, and
 //   `http.postJson` sends a value as JSON and parses the answer like `json`.
-// Decisions and alternatives: work/notes/observations/code-recipes-decisions.md.
+// Decisions and alternatives: work/notes/observations/code-recipes-decisions.md,
+// and for `ctx.cookies` work/notes/observations/2026-09-29-recipe-set-cookie-decisions.md.
 
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {DEFAULT_TIMEOUT_MS} from 'serpcast-recipe';
 import {REQUEST_KINDS} from './chrome.js';
+import type {DocumentCookies} from './cookies.js';
 import type {SearchResult} from './declarative.js';
 import {SerpcastError} from './errors.js';
 import type {JsonValue} from './store.js';
@@ -76,6 +79,12 @@ export interface CodeRecipeSession {
 
 export interface CodeRecipeContext {
 	http: CodeRecipeHttp;
+	/**
+	 * The engine's transport-session cookies as a page's script sees them
+	 * (`document.cookie`): a cookie set here is sent by the next matching
+	 * `http` request and kept with the session.
+	 */
+	cookies: DocumentCookies;
 	session: CodeRecipeSession;
 	/** Aborts on the caller's abort or the recipe's timeout. */
 	signal: AbortSignal;
@@ -101,8 +110,12 @@ export interface CodeRecipe {
 }
 
 export interface RunCodeRecipeOptions {
-	/** Where requests go: a transport session (its cookies are used and kept). */
-	session: Pick<TransportSession, 'request'>;
+	/**
+	 * Where requests go: a transport session (its cookies are used and kept).
+	 * Without `documentCookies`, `ctx.cookies` is a `recipe` error.
+	 */
+	session: Pick<TransportSession, 'request'> &
+		Partial<Pick<TransportSession, 'documentCookies'>>;
 	/** The engine's JSON state, read and written in place by `ctx.session`. */
 	state?: {[key: string]: JsonValue};
 	signal?: AbortSignal;
@@ -183,6 +196,7 @@ export async function runCodeRecipe(
 		: timer.signal;
 	const ctx: CodeRecipeContext = {
 		http: http(name, options.session, signal),
+		cookies: cookies(name, options.session.documentCookies),
 		session: session(name, options.state ?? {}),
 		signal,
 		...(options.maxResults !== undefined && {maxResults: options.maxResults}),
@@ -286,6 +300,34 @@ function http(
 			});
 			return parse(url, response);
 		},
+	};
+}
+
+/** `ctx.cookies`: the session's, or `recipe` errors when the transport has none. */
+function cookies(
+	name: string,
+	document: DocumentCookies | undefined,
+): DocumentCookies {
+	const missing = (): never => {
+		throw new SerpcastError(
+			'recipe',
+			`${name}: ctx.cookies needs a transport session with documentCookies (the injected transport has none)`,
+		);
+	};
+	if (!document) return {get: missing, set: missing, delete: missing};
+	const call = <T>(f: () => T): T => {
+		try {
+			return f();
+		} catch (error) {
+			if (error instanceof SerpcastError)
+				throw new SerpcastError('recipe', `${name}: ${error.message}`);
+			throw error;
+		}
+	};
+	return {
+		get: (url) => call(() => document.get(url)),
+		set: (url, cookie) => call(() => document.set(url, cookie)),
+		delete: (url, key) => call(() => document.delete(url, key)),
 	};
 }
 

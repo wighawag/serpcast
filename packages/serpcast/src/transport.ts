@@ -47,7 +47,12 @@ import {
 	type FetchSite,
 	type RequestKind,
 } from './chrome.js';
-import {CookieStore, type StoredCookie} from './cookies.js';
+import {
+	CookieStore,
+	documentCookies,
+	type DocumentCookies,
+	type StoredCookie,
+} from './cookies.js';
 import {SerpcastError} from './errors.js';
 import {checkPreflight, postBody, type PostOptions} from './post.js';
 import {respond, type TransportResponse} from './response.js';
@@ -127,6 +132,8 @@ export interface TransportSession {
 	request(url: string, options: RequestOptions): Promise<TransportResponse>;
 	cookies(): StoredCookie[];
 	clearCookies(): void;
+	/** The same cookies as a page's script sees them (`document.cookie`): what a code recipe's `ctx.cookies` uses. */
+	documentCookies: DocumentCookies;
 	/**
 	 * Close the session's connections: at once when no request is in flight,
 	 * else as soon as those settle (they are not aborted). Cookies are kept,
@@ -217,6 +224,7 @@ export function createTransport(options: TransportOptions = {}): Transport {
 			return {
 				cookies: () => jar.list(),
 				clearCookies: () => jar.clear(),
+				documentCookies: documentCookies(jar),
 				close: () => {
 					connections?.close();
 					anonymous?.close();

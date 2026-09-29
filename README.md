@@ -29,6 +29,7 @@ const transport = createTransport({proxy: 'socks5h://127.0.0.1:9050'});
 const session = transport.session(); // cookies; session.cookies() is plain JSON
 const page = await session.request('https://example.com/', {kind: 'document'});
 const api = await session.request('https://example.com/api?q=x', {kind: 'fetch', referer: page.url});
+session.documentCookies.set(page.url, 'token=abc; Path=/'); // as the page's script would (document.cookie)
 session.close(); // closes the session's connections (cookies are kept)
 ```
 
@@ -179,7 +180,7 @@ const myApi = await loadCodeRecipe('./my-api.mjs'); // imports (runs) the module
 const {results} = await serpcast.search('some query', {engines: [myApi, loadRecipeFile('./fallback.json')]});
 ```
 
-`loadCodeRecipe(path)` imports the ESM module at `path` (relative to the working directory) and returns its default export, which must be `{name, search(query, ctx), timeoutMs?, decoyProne?}` (`decoyProne` a boolean, see [Decoy guard](#decoy-guard)); a module that cannot be imported or has another shape is a `recipe` error. A code recipe goes in the engine chain like a declarative one (same failures, cooldowns and sessions), and `runCodeRecipe(recipe, query, {session, state?, signal?, maxResults?})` runs one outside a chain. `search` returns (or resolves to) the results; `ctx` is:
+`loadCodeRecipe(path)` imports the ESM module at `path` (relative to the working directory) and returns its default export, which must be `{name, search(query, ctx), timeoutMs?, decoyProne?}` (`decoyProne` a boolean, see [Decoy guard](#decoy-guard)); a module that cannot be imported or has another shape is a `recipe` error. A code recipe goes in the engine chain like a declarative one (same failures, cooldowns and sessions), and `runCodeRecipe(recipe, query, {session, state?, signal?, maxResults?})` runs one outside a chain (`session` needs `request`, and `documentCookies` for `ctx.cookies`). `search` returns (or resolves to) the results; `ctx` is:
 
 | member                          | what it is                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -188,6 +189,7 @@ const {results} = await serpcast.search('some query', {engines: [myApi, loadReci
 | `http.json(url, options)`       | The body parsed as JSON, statuses as for `text`. A body that is not JSON (often a challenge page) is a `recipe` error.                                                                                                                                                                                                                                                                                           |
 | `http.post(url, {kind: 'fetch', referer, body?, contentType?, fetchSite?, timeoutMs?})` | A page's `fetch()` POST through the engine's transport session (see POST under [Transport](#transport-libcurl-impersonate)): `body` a string or a `Uint8Array` (at most 1 MiB), `contentType` defaulting as `fetch()` does; the CORS preflight Chrome would send first is sent too. `kind` must be `fetch`. Resolves to the raw response, whatever its status. |
 | `http.postJson(url, value, {kind: 'fetch', referer, contentType?, fetchSite?, timeoutMs?})` | POSTs `JSON.stringify(value)` as `application/json` (unless `contentType` says otherwise) and parses the answer as `json` does, with the same status mapping. A value JSON cannot represent is a `recipe` error. |
+| `cookies.set(url, cookie)`, `cookies.get(url)`, `cookies.delete(url, name)` | The engine's transport-session cookies as a page's script sees them (`document.cookie`), for a cookie a site sets from JavaScript (a challenge token) rather than with `Set-Cookie`. `set` applies `cookie` (`name=value; Path=/; Secure; Max-Age=60; Domain=...`) as `document.cookie = cookie` would on the page at `url`: the `Set-Cookie` rules of the store (host-only unless a valid `Domain` is given, `Path` defaulting to the URL's directory, `Secure` only from https, `__Secure-`/`__Host-` prefixes), `HttpOnly` ignored, and never replacing an `HttpOnly` cookie. It returns `false` when the cookie is rejected (a browser drops it silently), else `true`. The cookie is then sent, where Chrome puts it, by every `http` request it matches, and kept and dropped with the session like any cookie. `get(url)` is what `document.cookie` reads there (`name=value; ...` of the non-`HttpOnly` cookies sent to `url`, `''` when none); `delete(url, name)` removes the cookies named `name` that `get(url)` shows. Names and values are kept byte for byte (`#` included). A `url` that is not http(s) is a `recipe` error. |
 | `session.get(key)`, `session.set(key, value)`, `session.delete(key)` | The engine's own JSON state (a token, a challenge answer), kept in the state store with its cookies: saved after every run whatever the outcome, dropped after `sessionIdleMs` unused or by `clearSessions()`. Values are copied; a value that is not plain JSON is a `recipe` error.                                                                                                                            |
 | `signal`                        | Aborts on the caller's abort or the recipe's `timeoutMs`. Every `http` request already carries it.                                                                                                                                                                                                                                                                                                              |
 | `maxResults`                    | The caller's `maxResults`, when given (the answer is cut to it anyway).                                                                                                                                                                                                                                                                                                                                         |
@@ -385,9 +387,9 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 
 | module             | LOC | target |
 | ------------------ | --: | -----: |
-| `src/code.ts`        | 365 |    320 |
+| `src/code.ts`        | 407 |    320 |
 | `src/download.ts`    | 290 |    300 |
-| `src/transport.ts`   | 596 |    300 |
+| `src/transport.ts`   | 604 |    300 |
 | `src/libcurl.ts`     | 272 |    280 |
 | `src/serpcast.ts`    | 243 |    260 |
 | `src/browser.ts`     | 233 |    250 |
@@ -397,19 +399,19 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 | `src/recipe-archive.ts` | 120 |    130 |
 | `src/recipes.ts`     |  96 |    100 |
 | `src/tar.ts`         |  48 |     60 |
-| `src/cookies.ts`     | 155 |    170 |
+| `src/cookies.ts`     | 245 |    170 |
 | `src/post.ts`        | 146 |    160 |
 | `src/searchcast-endpoint.ts` | 154 |    170 |
 | `src/doctor.ts`      | 153 |    170 |
 | `src/cli.ts`         | 179 |    180 |
 | `src/html.ts`        | 126 |    150 |
 | `src/chrome.ts`      | 361 |    150 |
-| `src/index.ts`       | 135 |    120 |
+| `src/index.ts`       | 140 |    120 |
 | `src/response.ts`    |  98 |    120 |
 | `src/store.ts`       |  63 |     80 |
 | `src/errors.ts`      |  36 |     40 |
 
-**Total own source: 4997 LOC** (excluding deps).
+**Total own source: 5144 LOC** (excluding deps).
 
 ## Develop
 

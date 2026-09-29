@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {parseSetCookie} from '../src/cookies.js';
-import {CookieStore} from '../src/index.js';
+import {CookieStore, documentCookies} from '../src/index.js';
 
 const NOW = Date.UTC(2026, 8, 28);
 const site = new URL('https://www.example.test/search/results?q=1');
@@ -109,5 +109,102 @@ describe('CookieStore', () => {
 		expect(restored.header(site, NOW)).toBe('a=1');
 		restored.clear();
 		expect(restored.list(NOW)).toEqual([]);
+	});
+});
+
+describe('CookieStore: document.cookie (a script at the page URL)', () => {
+	it('applies the string as a Set-Cookie from the page, ignoring HttpOnly', () => {
+		const jar = new CookieStore();
+		expect(
+			jar.setFromScript(site, 'a=1; Path=/; HttpOnly; SameSite=Lax', NOW),
+		).toBe(true);
+		expect(jar.list(NOW)).toEqual([
+			{
+				name: 'a',
+				value: '1',
+				domain: 'www.example.test',
+				hostOnly: true,
+				path: '/',
+				secure: false,
+				httpOnly: false,
+				created: NOW,
+			},
+		]);
+		expect(
+			jar.setFromScript(site, 'd=1; Domain=example.test; Path=/', NOW),
+		).toBe(true);
+		expect(jar.header(new URL('https://api.example.test/'), NOW)).toBe('d=1');
+	});
+
+	it('rejects what the Set-Cookie rules reject, and a Secure cookie from http', () => {
+		const jar = new CookieStore();
+		expect(jar.setFromScript(site, 'a=1; Domain=other.test', NOW)).toBe(false);
+		expect(
+			jar.setFromScript(
+				new URL('http://www.example.test/'),
+				's=1; Secure',
+				NOW,
+			),
+		).toBe(false);
+		expect(jar.list(NOW)).toEqual([]);
+	});
+
+	it('never reads, replaces or deletes an HttpOnly cookie', () => {
+		const jar = new CookieStore();
+		jar.store(site, ['h=server; Path=/; HttpOnly', 'v=1; Path=/'], NOW);
+		expect(jar.documentCookie(site, NOW)).toBe('v=1');
+		expect(jar.setFromScript(site, 'h=script; Path=/', NOW)).toBe(false);
+		jar.deleteFromScript(site, 'h', NOW);
+		expect(jar.header(site, NOW)).toBe('h=server; v=1');
+	});
+
+	it('get shows what is sent to the URL, in order; delete removes those by name', () => {
+		const jar = new CookieStore();
+		jar.setFromScript(site, 'a=1; Path=/', NOW);
+		jar.setFromScript(site, 'a=2; Path=/search', NOW + 1);
+		jar.setFromScript(site, 'b=3; Path=/other', NOW + 2);
+		expect(jar.documentCookie(site, NOW + 3)).toBe('a=2; a=1');
+		expect(jar.documentCookie(new URL('https://x.test/'), NOW)).toBe('');
+		jar.deleteFromScript(site, 'a', NOW + 3);
+		expect(jar.list(NOW + 3).map((c) => c.name)).toEqual(['b']);
+	});
+
+	it('honours Max-Age: a positive one expires, 0 deletes', () => {
+		const jar = new CookieStore();
+		jar.setFromScript(site, 'm=1; Path=/; Max-Age=10', NOW);
+		expect(jar.header(site, NOW + 9_000)).toBe('m=1');
+		expect(jar.header(site, NOW + 10_000)).toBeUndefined();
+		jar.setFromScript(site, 'n=1; Path=/', NOW);
+		expect(jar.setFromScript(site, 'n=; Path=/; Max-Age=0', NOW)).toBe(true);
+		expect(jar.list(NOW)).toEqual([]);
+	});
+
+	it('keeps a name with # (and other token characters) byte for byte', () => {
+		const jar = new CookieStore();
+		jar.setFromScript(site, "a#b!$%&'*+-.^_`|~=v#1; Path=/", NOW);
+		jar.store(site, ['s#t=2; Path=/'], NOW + 1);
+		expect(jar.header(site, NOW + 2)).toBe("a#b!$%&'*+-.^_`|~=v#1; s#t=2");
+		const restored = new CookieStore(
+			JSON.parse(JSON.stringify(jar.list(NOW + 2))),
+		);
+		expect(restored.documentCookie(site, NOW + 2)).toBe(
+			"a#b!$%&'*+-.^_`|~=v#1; s#t=2",
+		);
+	});
+});
+
+describe('documentCookies', () => {
+	it('takes string URLs and refuses a non-http(s) one as a recipe error', () => {
+		const jar = new CookieStore();
+		const doc = documentCookies(jar, () => NOW);
+		expect(doc.set(site.href, 'a=1; Path=/')).toBe(true);
+		expect(doc.get(site.href)).toBe('a=1');
+		doc.delete(site.href, 'a');
+		expect(doc.get(site.href)).toBe('');
+		for (const bad of ['nope', 'file:///etc/passwd']) {
+			expect(() => doc.set(bad, 'a=1')).toThrow(
+				expect.objectContaining({kind: 'recipe'}),
+			);
+		}
 	});
 });

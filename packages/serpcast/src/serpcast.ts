@@ -68,14 +68,16 @@ import {
 export type Engine = Recipe | CodeRecipe | BrowserEngine;
 
 /**
- * What the chain needs of a transport. `close` on a session is optional so a
- * transport injected before sessions had it keeps working; without it the
- * chain just drops the session.
+ * What the chain needs of a transport. `close` and `documentCookies` on a
+ * session are optional so a transport injected before sessions had them keeps
+ * working: without `close` the chain just drops the session; without
+ * `documentCookies` a code recipe's `ctx.cookies` is a `recipe` error.
  */
 export interface ChainTransport {
 	session(
 		cookies?: readonly StoredCookie[],
-	): Omit<TransportSession, 'close'> & Partial<Pick<TransportSession, 'close'>>;
+	): Omit<TransportSession, 'close' | 'documentCookies'> &
+		Partial<Pick<TransportSession, 'close' | 'documentCookies'>>;
 }
 
 export interface SerpcastOptions extends TransportOptions {

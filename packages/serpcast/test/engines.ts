@@ -6,6 +6,7 @@
 import {parseRecipe, type Recipe} from 'serpcast-recipe';
 import {
 	CookieStore,
+	documentCookies,
 	type ChainTransport,
 	createMemoryStore,
 	type JsonValue,
@@ -80,6 +81,7 @@ export function fakeTransport(
 			return {
 				cookies: () => jar.list(),
 				clearCookies: () => jar.clear(),
+				documentCookies: documentCookies(jar),
 				async request(
 					url: string,
 					options: RequestOptions,

@@ -1,0 +1,21 @@
+# recipe-set-cookie: decisions (2026-09-29)
+
+Decisions taken while building `ctx.cookies` (task `recipe-set-cookie`), for a reviewer or human to ratify or reverse. Code sites: `packages/serpcast/src/cookies.ts` (`setFromScript`, `documentCookie`, `deleteFromScript`, `DocumentCookies`, `documentCookies()`), `code.ts` (`ctx.cookies`), `transport.ts` (`TransportSession.documentCookies`), `serpcast.ts` (`ChainTransport`).
+
+Reality check first: the task's premises held. `ctx` offered only `http`, `session`, `signal`, `maxResults`, `blocked`, `recipeError`; the `CookieStore` lived inside the transport session's closure with no write path other than `Set-Cookie`; the parser already kept `#` in names (it only splits on `;` and the first `=`), so no parser change was needed for it, only tests.
+
+1. **New public member `TransportSession.documentCookies: DocumentCookies`** (`get(url)`, `set(url, cookie)`, `delete(url, name)`, string URLs). The recipe needs a write path into the transport session's store, which is only reachable through the session. Alternatives: expose the `CookieStore` object itself on the session (leaks the whole mutable store, including HttpOnly writes, to anything holding the session); three flat methods on the session (`setDocumentCookie`, ...; noisier interface). The name follows the web concept it mirrors; "cookie jar" is an _Avoid_ term in CONTEXT.md, so not used. Touches: anyone implementing a transport. Exported with a `documentCookies(jar)` helper so an injected transport can provide it in one line.
+
+2. **Optional on `ChainTransport` and on `runCodeRecipe`'s `session`; absent means `ctx.cookies` throws a `recipe` error** (`<name>: ctx.cookies needs a transport session with documentCookies ...`). Follows the precedent of `close` (made optional so older injected transports keep working). `ctx.cookies` is always present (so a recipe gets a typed `SerpcastError`, not a `TypeError` wrapped as "threw ..."). Kind `recipe` because CONTEXT defines it as "the recipe does not fit the site or the runner" (like a browser-only feature over HTTP). Alternative: make it required on `ChainTransport` (a type break for injected transports). New error; touches injected transports and direct `runCodeRecipe` callers.
+
+3. **`set` returns a boolean** (`true` applied, `false` rejected) instead of throwing on rejection or returning nothing. `document.cookie` silently drops an invalid cookie, and a recipe mirrors a page's script, so no throw; but a silent drop is a debugging trap for a recipe author, and a boolean costs nothing. A `Max-Age=0` deletion counts as applied (`true`).
+
+4. **Script rules = the `Set-Cookie` rules minus HttpOnly, plus RFC 6265 5.3 step 11**: the string goes through the same `parseSetCookie` (as the spec's `document.cookie` setter does), `HttpOnly` is forced off, and a script cannot replace an existing HttpOnly cookie of the same name/domain/path (`set` returns `false`); `get` never shows and `delete` never removes an HttpOnly cookie. This is what Chrome does. Not implemented (as for `Set-Cookie` today): "leave secure cookies alone" (an http page overwriting a Secure cookie) and SameSite (see `2026-09-29-cross-site-cookies-ignore-samesite.md`).
+
+5. **`get(url)` returns the `document.cookie` string** (`name=value; ...`, Chrome's send order, `''` when none), not a structured list, as the task specified ("the `document.cookie` view"). Cookie attributes are not exposed on `ctx`, as a page script cannot see them either.
+
+6. **`delete(url, name)` removes every non-HttpOnly cookie named `name` that `get(url)` shows** (all paths/domains that match `url`), rather than requiring the exact path/domain like a `Max-Age=0` assignment. It is the inverse of `get`, which is what a recipe author sees. The exact-scope deletion is still available as `set(url, 'name=; Path=/x; Max-Age=0')`.
+
+7. **Invalid URL** (not http(s)) is a `recipe` error with the same message as `http.get` (`not an http(s) URL: ...`), prefixed with the recipe name.
+
+8. **README LOC table**: updated only the rows this task changed (`code.ts`, `transport.ts`, `cookies.ts`, `index.ts`) and the total by this task's delta, as `post-requests` did; the table was already stale (`2026-09-29-loc-table-stale.md`). `cookies.ts` is now 245 lines against a 170 target.

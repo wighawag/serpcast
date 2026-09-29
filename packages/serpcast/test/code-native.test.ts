@@ -115,4 +115,29 @@ describe.skipIf(!LIB)('code recipes (native libcurl-impersonate)', () => {
 		);
 		await serpcast.close();
 	});
+	it('a cookie set with ctx.cookies (a name with #) reaches the server byte for byte, where Chrome puts it', async () => {
+		const origin = `https://localhost:${server.port}`;
+		const recipe: CodeRecipe = {
+			name: 'setter',
+			async search(query, ctx) {
+				ctx.cookies.set(`${origin}/`, 'chal#1=a+b/c=; Path=/api; Secure');
+				ctx.cookies.set(`${origin}/`, 'other=1; Path=/elsewhere');
+				await ctx.http.get(`${origin}/api?q=${query}`, {kind: 'document'});
+				return [];
+			},
+		};
+		const serpcast = createSerpcast({libcurlPath: LIB, caPath: CA_PATH});
+		await serpcast.search('set', {engines: [recipe]});
+		const request = seen.find((s) => s.path === '/api?q=set')!;
+		const names = request.headers.filter(
+			(_, i) => i % 2 === 0 && !request.headers[i]!.startsWith(':'),
+		);
+		expect(names).toEqual(
+			headerTable('document', {cookie: 'x'}).map(([name]) => name),
+		);
+		expect(request.headers[request.headers.indexOf('cookie') + 1]).toBe(
+			'chal#1=a+b/c=',
+		);
+		await serpcast.close();
+	});
 });

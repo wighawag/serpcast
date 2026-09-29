@@ -65,7 +65,12 @@ export {
 	type SearchcastLibraryOptions,
 	type SearchcastModule,
 } from './browser.js';
-export {CookieStore, type StoredCookie} from './cookies.js';
+export {
+	CookieStore,
+	documentCookies,
+	type DocumentCookies,
+	type StoredCookie,
+} from './cookies.js';
 import {LIBCURL_IMPERSONATE} from './libcurl.js';
 export {
 	LIBCURL_IMPERSONATE,

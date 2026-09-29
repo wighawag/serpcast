@@ -518,6 +518,146 @@ describe('code recipes: ctx.session', () => {
 	});
 });
 
+describe('code recipes: ctx.cookies (document.cookie)', () => {
+	it('a cookie it sets is sent by the next matching request only, as a page script would set it', async () => {
+		const recipe = code('c', async (_, ctx) => {
+			const page = 'https://c.test/app/page';
+			expect(ctx.cookies.set(page, 'tok#1=abc; Path=/; SameSite=Lax')).toBe(
+				true,
+			);
+			expect(ctx.cookies.set(page, 'dir=1')).toBe(true); // default path /app
+			expect(ctx.cookies.set(page, 'sec=1; Path=/; Secure')).toBe(true);
+			expect(
+				ctx.cookies.set(page, 'dom=1; Path=/; Domain=c.test; HttpOnly'),
+			).toBe(true);
+			// Rejected as document.cookie would: another site's Domain, Secure from http.
+			expect(ctx.cookies.set(page, 'x=1; Domain=other.test')).toBe(false);
+			expect(ctx.cookies.set('http://c.test/', 'y=1; Secure')).toBe(false);
+			for (const url of [
+				'https://c.test/app/q',
+				'https://c.test/other',
+				'http://c.test/app/q',
+				'https://api.c.test/',
+				'https://other.test/',
+			])
+				await ctx.http.get(url, {kind: 'document'});
+			return [];
+		});
+		const {serpcast, requests} = setup({});
+		await serpcast.search('q', {engines: [recipe]});
+		expect(requests.map((r) => [r.url, r.cookie])).toEqual([
+			['https://c.test/app/q', 'dir=1; tok#1=abc; sec=1; dom=1'],
+			['https://c.test/other', 'tok#1=abc; sec=1; dom=1'],
+			['http://c.test/app/q', 'dir=1; tok#1=abc; dom=1'],
+			['https://api.c.test/', 'dom=1'],
+			['https://other.test/', undefined],
+		]);
+	});
+
+	it('HttpOnly in the string is ignored: the cookie stays visible to get', async () => {
+		const recipe = code('h', (_, ctx) => {
+			ctx.cookies.set('https://h.test/', 'a=1; Path=/; HttpOnly');
+			return [
+				{title: ctx.cookies.get('https://h.test/'), url: 'https://r.example/'},
+			];
+		});
+		const {serpcast} = setup({});
+		const {results} = await serpcast.search('q', {engines: [recipe]});
+		expect(results[0]!.title).toBe('a=1');
+	});
+
+	it('get shows the non-HttpOnly cookies sent to a URL, delete removes one by name', async () => {
+		const recipe = code('g', async (_, ctx) => {
+			await ctx.http.get('https://g.test/', {kind: 'document'});
+			ctx.cookies.set('https://g.test/', 'b=2; Path=/');
+			const before = ctx.cookies.get('https://g.test/');
+			ctx.cookies.delete('https://g.test/', 'b');
+			ctx.cookies.delete('https://g.test/', 'server'); // HttpOnly: untouched
+			const after = ctx.cookies.get('https://g.test/');
+			await ctx.http.get('https://g.test/next', {kind: 'document'});
+			return [{title: `${before}|${after}`, url: 'https://r.example/'}];
+		});
+		const {serpcast, requests} = setup({
+			g: () => ({
+				body: '',
+				setCookie: ['server=s; Path=/; HttpOnly', 'seen=1; Path=/'],
+			}),
+		});
+		const {results} = await serpcast.search('q', {engines: [recipe]});
+		expect(results[0]!.title).toBe('seen=1; b=2|seen=1');
+		expect(requests[1]!.cookie).toBe('server=s; seen=1');
+	});
+
+	it('persists across searches with the session, and is dropped with it (idle expiry, clearSessions)', async () => {
+		let set = true;
+		const recipe = code('p', async (_, ctx) => {
+			if (set) ctx.cookies.set('https://p.test/', 'k#1=v; Path=/');
+			set = false;
+			await ctx.http.get('https://p.test/', {kind: 'document'});
+			return [];
+		});
+		const {serpcast, requests, time} = setup({}, {sessionIdleMs: 60_000});
+		const cookie = async () => {
+			await serpcast.search('q', {engines: [recipe]});
+			return requests.at(-1)!.cookie;
+		};
+		expect(await cookie()).toBe('k#1=v');
+		time.advance(59_999);
+		expect(await cookie()).toBe('k#1=v');
+		time.advance(60_000);
+		expect(await cookie()).toBeUndefined();
+		set = true;
+		expect(await cookie()).toBe('k#1=v');
+		await serpcast.clearSessions('p');
+		expect(await cookie()).toBeUndefined();
+		set = true;
+		expect(await cookie()).toBe('k#1=v');
+		await serpcast.clearSessions();
+		expect(await cookie()).toBeUndefined();
+	});
+
+	it('saves the cookie in the state store with the session', async () => {
+		const store = (await import('../src/index.js')).createMemoryStore();
+		const recipe = code('s', (_, ctx) => {
+			ctx.cookies.set('https://s.test/', 'a#b=1; Path=/');
+			return [];
+		});
+		const {serpcast} = setup({}, {store});
+		await serpcast.search('q', {engines: [recipe]});
+		const saved = (await store.get('engine/s/session')) as {
+			cookies: {name: string; value: string}[];
+		};
+		expect(saved.cookies).toMatchObject([{name: 'a#b', value: '1'}]);
+	});
+
+	it('a non-http(s) URL is a recipe error', async () => {
+		const {serpcast} = setup({});
+		const error = await onlyFailure(
+			serpcast,
+			code('u', (_, ctx) => {
+				ctx.cookies.set('javascript:x', 'a=1');
+				return [];
+			}),
+		);
+		expect(error.kind).toBe('recipe');
+		expect(error.message).toBe('u: not an http(s) URL: javascript:x');
+	});
+
+	it('a session without documentCookies (an older injected transport) makes ctx.cookies a recipe error', async () => {
+		const recipe = code('o', (_, ctx) => {
+			ctx.cookies.get('https://o.test/');
+			return [];
+		});
+		const error = await failure(
+			runCodeRecipe(recipe, 'q', {session: {request: () => expect.fail()}}),
+		);
+		expect(error.kind).toBe('recipe');
+		expect(error.message).toMatch(
+			/ctx.cookies needs a transport session with documentCookies/,
+		);
+	});
+});
+
 describe('code recipes: output and errors', () => {
 	it.each([
 		['not an array', {results: []}, /not an array/],
