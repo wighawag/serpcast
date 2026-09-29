@@ -8,11 +8,15 @@
 //   with the wrong fingerprint, so it aborts the whole search at once.
 // - `blocked` starts a cooldown: the engine is skipped (and reported as a
 //   `blocked` failure saying so) until it ends.
-// - An engine named in `decoyGuard` whose answer is a decoy (decoy.ts) is a
-//   `decoy` failure and the chain moves on. No cooldown: a decoy is a
-//   property of (engine, query, moment), so cooling the engine would drop its
-//   good answers to other queries. The whole answer is judged, before the
-//   `maxResults` cut.
+// - A guarded engine whose answer is a decoy (decoy.ts) is a `decoy` failure
+//   and the chain moves on. No cooldown: a decoy is a property of (engine,
+//   query, moment), so cooling the engine would drop its good answers to
+//   other queries. The whole answer is judged, before the `maxResults` cut.
+//   An engine is guarded when it is named in `decoyGuard` OR its recipe
+//   declares `decoyProne: true` (a library-mode browser engine: its recipe's).
+//   There is no option to switch the guard off: the caller passes the engine
+//   with `decoyProne: false` (engines are plain objects) or edits the recipe.
+//   Decisions: work/notes/observations/2026-09-29-decoy-prone-recipes-decisions.md.
 // - The caller's abort rejects with the signal's reason and is not a failure.
 // - Any other error that is not a `SerpcastError` is a bug and is rethrown.
 //
@@ -90,7 +94,8 @@ export interface SerpcastOptions extends TransportOptions {
 	/**
 	 * The engines (by name) whose answers are checked with `isDecoy`: a decoy
 	 * page is a `decoy` failure and the next engine is tried (no cooldown).
-	 * Default: none.
+	 * Engines whose recipe declares `decoyProne: true` are checked too, named
+	 * here or not. Default: none.
 	 */
 	decoyGuard?: readonly string[];
 }
@@ -166,6 +171,15 @@ function sameCookies(
 	return canonical(a) === canonical(b);
 }
 
+/** Whether the engine's recipe declares `decoyProne: true` (a browser engine: its library-mode recipe; an endpoint has none here). */
+function decoyProne(engine: Engine): boolean {
+	if (!isBrowserEngine(engine)) return engine.decoyProne === true;
+	const target = engine.searchcast;
+	return 'recipe' in target && typeof target.recipe === 'object'
+		? target.recipe.decoyProne === true
+		: false;
+}
+
 export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	const now = options.now ?? Date.now;
 	const store = options.store ?? createMemoryStore({now});
@@ -173,7 +187,9 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
 	const idleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 	const browser = createBrowserRunner(options);
-	const guarded = new Set(options.decoyGuard ?? []);
+	const named = new Set(options.decoyGuard ?? []);
+	const guarded = (engine: Engine) =>
+		named.has(engine.name) || decoyProne(engine);
 
 	type Session = ReturnType<ChainTransport['session']>;
 	/** Each HTTP engine's live transport session, kept for its connections; `uses` counts searches running on it. */
@@ -306,7 +322,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 				}
 				try {
 					const results = await run(engine, query, {signal, maxResults});
-					if (guarded.has(name) && isDecoy(query, results)) {
+					if (guarded(engine) && isDecoy(query, results)) {
 						const titles = results
 							.slice(0, 5)
 							.map((r) => JSON.stringify(r.title))

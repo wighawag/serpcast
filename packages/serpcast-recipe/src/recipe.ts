@@ -5,6 +5,11 @@
 // 0003). Keep it that way: searchcast re-exports this module, so any change in
 // meaning or wording here is a change to searchcast too. This file must not
 // import anything from `node:*`; the file loaders live in `./node.ts`.
+//
+// One addition since the extraction: the optional `decoyProne` boolean. It is
+// validated and kept in `parseRecipe`'s output; serpcast's engine chain reads
+// it, searchcast ignores it (it has no chain). A recipe without it is parsed
+// exactly as before, with the same messages.
 
 /** How to read one value out of a result item. */
 export interface FieldSpec {
@@ -47,6 +52,12 @@ export interface Recipe {
 	limit?: number;
 	/** Per-request budget in milliseconds. Default 15000. */
 	timeoutMs?: number;
+	/**
+	 * The site sometimes answers with results unrelated to the query (a decoy
+	 * page). serpcast's engine chain then checks this engine's answers without
+	 * the caller naming it in `decoyGuard`; searchcast ignores it.
+	 */
+	decoyProne?: boolean;
 }
 
 export class RecipeError extends Error {
@@ -80,6 +91,13 @@ function posInt(v: unknown, path: string): number | undefined {
 	if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
 		throw new RecipeError(`${path} must be a positive integer`);
 	}
+	return v;
+}
+
+function optBool(v: unknown, path: string): boolean | undefined {
+	if (v === undefined) return undefined;
+	if (typeof v !== 'boolean')
+		throw new RecipeError(`${path} must be a boolean`);
 	return v;
 }
 
@@ -175,5 +193,6 @@ export function parseRecipe(value: unknown, fallbackName?: string): Recipe {
 		results: {item, fields},
 		limit: posInt(value.limit, where('limit')),
 		timeoutMs: posInt(value.timeoutMs, where('timeoutMs')),
+		decoyProne: optBool(value.decoyProne, where('decoyProne')),
 	};
 }

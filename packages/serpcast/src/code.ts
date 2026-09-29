@@ -1,5 +1,5 @@
 // Code recipes: a JS module, loaded only from the path the caller gives, whose
-// default export is `{name, search(query, ctx), timeoutMs?}`. The context is
+// default export is `{name, search(query, ctx), timeoutMs?, decoyProne?}`. The context is
 // the only capability serpcast hands it: `http` (GET through this engine's
 // transport session, so the caller's proxy, the pinned fingerprint and the
 // session cookies all apply), `session` (JSON state kept with the cookies),
@@ -76,6 +76,8 @@ export interface CodeRecipe {
 	): SearchResult[] | Promise<SearchResult[]>;
 	/** The whole search's time limit in ms. Default `DEFAULT_TIMEOUT_MS`. */
 	timeoutMs?: number;
+	/** The site sometimes answers with decoy pages: the chain checks this engine's answers without it being named in `decoyGuard`. */
+	decoyProne?: boolean;
 }
 
 export interface RunCodeRecipeOptions {
@@ -122,10 +124,14 @@ export async function loadCodeRecipe(path: string): Promise<CodeRecipe> {
 		!(typeof timeoutMs === 'number' && timeoutMs > 0)
 	)
 		throw bad('"timeoutMs" must be a positive number');
+	const {decoyProne} = recipe;
+	if (decoyProne !== undefined && typeof decoyProne !== 'boolean')
+		throw bad('"decoyProne" must be a boolean');
 	return {
 		name: recipe.name,
 		search: recipe.search.bind(recipe),
 		...(timeoutMs !== undefined && {timeoutMs}),
+		...(decoyProne !== undefined && {decoyProne}),
 	};
 }
 

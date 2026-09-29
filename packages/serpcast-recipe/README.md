@@ -2,7 +2,7 @@
 
 The recipe format for keyless search engines: the schema, its TypeScript types and its validator. It is shared by [serpcast](https://github.com/wighawag/serpcast) (runs a recipe over plain HTTP with a real browser's fingerprint) and [searchcast](https://github.com/wighawag/searchcast) (runs a recipe in a real browser), so one recipe file describes a site for both. It has no runtime dependencies and is MIT licensed so projects under any license can share the format.
 
-The format is the one searchcast introduced, unchanged: every recipe searchcast accepts is accepted here, with the same error messages.
+The format is the one searchcast introduced: every recipe searchcast accepts is accepted here, with the same error messages. The one addition is the optional `decoyProne` field, which serpcast's engine chain reads and searchcast ignores.
 
 ## Recipes
 
@@ -41,6 +41,7 @@ A recipe is a JSON file. When loading a directory, each `*.json` file is one rec
 | `results.fields` | Field name to `{selector?, attr?}`. `selector` is relative to the item (omitted: the item itself). `attr` omitted reads visible text; `href` and `src` resolve to absolute URLs. `title` and `url` are required; results missing either are skipped. Other fields are passed through. |
 | `limit`          | Maximum results, default 10.                                                                                                                                                                                                                                                          |
 | `timeoutMs`      | Per-query budget, default 15000.                                                                                                                                                                                                                                                      |
+| `decoyProne`     | Optional boolean: the site sometimes answers with results unrelated to the query (a decoy page). serpcast's engine chain then checks this engine's answers for decoys; searchcast ignores it. `parseRecipe` keeps it in its output.                                                   |
 
 Exactly one of `navigate` and `form` must be set.
 

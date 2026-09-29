@@ -73,13 +73,13 @@ await serpcast.close(); // closes engine connections, stops a library-mode brows
 | `now`           | `Date.now`                         | The clock for cooldowns and sessions (and the default store).                                         |
 | `transport`     | created from the transport options | A transport to use instead (tests, or sharing one between instances).                                 |
 | `searchcast`    | none                               | How library-mode [browser engines](#browser-engines-searchcast) start searchcast.                     |
-| `decoyGuard`    | none                               | The engines (by name) whose answers are checked for [decoys](#decoy-guard), e.g. `['bing']`.          |
+| `decoyGuard`    | none                               | The engines (by name) whose answers are checked for [decoys](#decoy-guard), e.g. `['bing']`, on top of those whose recipe declares `decoyProne: true`. |
 
 `search(query, {engines, maxResults?, signal?})`: an engine is a declarative recipe, a [code recipe](#code-recipes) or a [browser engine](#browser-engines-searchcast), identified by its `name`. `maxResults` cuts the answer (each recipe's `limit` still applies). How each outcome is handled:
 
 - **Results or an `empty` match**: returned as `{results, engine, failures}`. Later engines are not called.
 - **`blocked`, `recipe`, `timeout`, `transport`**: recorded in `failures` and the next engine is tried. `blocked` also starts the engine's **cooldown**: until it ends, the engine is skipped and listed in `failures` with a `blocked` error saying it is cooling down (so an all-skipped chain still says why).
-- **`decoy`** (only for an engine named in `decoyGuard`): its answer was a page unrelated to the query. Recorded in `failures` and the next engine is tried, with **no cooldown** (see [Decoy guard](#decoy-guard)).
+- **`decoy`** (only for a guarded engine: named in `decoyGuard`, or its recipe declares `decoyProne: true`): its answer was a page unrelated to the query. Recorded in `failures` and the next engine is tried, with **no cooldown** (see [Decoy guard](#decoy-guard)).
 - **Every engine failed**: the search throws a `SerpcastError` of kind `exhausted`, whose `failures` lists every `{engine, error}` in order. It never answers `[]` for that. An empty `engines` list is `exhausted` too.
 - **`impersonation`** is not an engine failure: it means every HTTP engine would search with the wrong fingerprint, so the search is aborted at once with that error (no later engine is tried, including a browser engine). Check `error.kind === 'impersonation'`.
 - **Aborting `signal`** rejects with the signal's reason; it is not an engine failure.
@@ -88,7 +88,7 @@ await serpcast.close(); // closes engine connections, stops a library-mode brows
 
 Some engines, Bing above all, answer some queries with a well-formed page of results unrelated to the query: a **decoy** (dictionary entries for "why" in answer to a question about Git, a gaming guide for a Debian kernel query). Nothing in the page says so, so without a guard it is returned as the answer. Measured in September 2026, through serpcast and two plain Node clients side by side, Bing decoyed about half of realistic queries (natural-language questions, 4 to 6 term technical queries) from a residential IP and most of them over Tor. It decoyed the SAME queries for every client, and over Tor a given query decoyed on every repeat; an immediate retry rescued none of 16 decoys. A decoy is a property of the engine, the query and the moment, not of the client, so no transport fixes it.
 
-`decoyGuard: ['bing']` checks the answers of the engines it names (any kind: declarative, code or browser; off by default). A decoy answer becomes a `decoy` failure and the chain moves on to the next engine. It starts **no cooldown**: decoys are per query, and cooling the engine would drop its good answers to other queries. The rule, `isDecoy(query, results)`, is exported so code recipes and callers can apply it themselves:
+`decoyGuard: ['bing']` checks the answers of the engines it names (any kind: declarative, code or browser; off by default). An engine whose recipe declares `decoyProne: true` is checked without being named: the recipe's author knows whether the site serves decoys, and engine names are chosen by the caller, so naming them is fragile. A declarative recipe declares it in its JSON, a code recipe on its default export, and a library-mode browser engine inherits it from its recipe (an endpoint-mode browser engine has no recipe object here, so name it in `decoyGuard`). An engine is guarded when either holds; there is no option to switch the guard off for a decoy-prone recipe, pass it as `{...recipe, decoyProne: false}` instead. A decoy answer becomes a `decoy` failure and the chain moves on to the next engine. It starts **no cooldown**: decoys are per query, and cooling the engine would drop its good answers to other queries. The rule, `isDecoy(query, results)`, is exported so code recipes and callers can apply it themselves:
 
 - The query's **terms** are its distinct words of 3 or more characters, minus a fixed list of function words and generic modifiers (`why`, `does`, `best`, `using`, ...).
 - A result is **relevant** when its title, snippet and URL together carry at least two distinct terms (or the only one), a term matching any word with the same first 5 characters ("replication" matches "replicate").
@@ -139,6 +139,8 @@ It requests `navigate.url` (`{query}` replaced by the URL-encoded query) as a ty
 4. The `empty` selector matches: `[]`. This is the only way to get an empty list.
 5. Nothing matched: a `recipe` error (the page does not match the recipe).
 
+A recipe may declare `"decoyProne": true` when its site sometimes answers with results unrelated to the query; the [engine chain](#decoy-guard) then checks its answers (the runner itself ignores the field).
+
 `ready` is checked before `empty`, as searchcast does. Each result is `{title, url, snippet?}` with every other field passed through as a string; `snippet` is the first present of the `content`, `snippet` and `description` fields. A recipe that needs a browser (`form`) is rejected with a `recipe` error, before any request, telling you to run it through searchcast. The whole call, redirects included, is bounded by the recipe's `timeoutMs` (default 15 s, then a `timeout` error), and aborting `signal` rejects with its reason.
 
 **One deliberate difference from searchcast.** searchcast keeps polling a live page until its deadline, so a page on which nothing matches, or on which `ready` matches but no item has both a title and a url, ends in a `timeout` there. serpcast answers `recipe` at once in both cases, because a static HTML response will not change.
@@ -157,6 +159,7 @@ A code recipe is a JS module for a site that needs challenge handling or a non-H
 export default {
 	name: 'my-api',
 	timeoutMs: 10_000, // the whole search; optional, default 15 s
+	// decoyProne: true, // optional: the chain checks answers for decoys (see Decoy guard)
 	async search(query, ctx) {
 		const data = await ctx.http.json(`https://api.example.com/search?q=${encodeURIComponent(query)}`, {kind: 'document'});
 		if (data.captcha) ctx.blocked('the API asks for a captcha');
@@ -175,7 +178,7 @@ const myApi = await loadCodeRecipe('./my-api.mjs'); // imports (runs) the module
 const {results} = await serpcast.search('some query', {engines: [myApi, loadRecipeFile('./fallback.json')]});
 ```
 
-`loadCodeRecipe(path)` imports the ESM module at `path` (relative to the working directory) and returns its default export, which must be `{name, search(query, ctx), timeoutMs?}`; a module that cannot be imported or has another shape is a `recipe` error. A code recipe goes in the engine chain like a declarative one (same failures, cooldowns and sessions), and `runCodeRecipe(recipe, query, {session, state?, signal?, maxResults?})` runs one outside a chain. `search` returns (or resolves to) the results; `ctx` is:
+`loadCodeRecipe(path)` imports the ESM module at `path` (relative to the working directory) and returns its default export, which must be `{name, search(query, ctx), timeoutMs?, decoyProne?}` (`decoyProne` a boolean, see [Decoy guard](#decoy-guard)); a module that cannot be imported or has another shape is a `recipe` error. A code recipe goes in the engine chain like a declarative one (same failures, cooldowns and sessions), and `runCodeRecipe(recipe, query, {session, state?, signal?, maxResults?})` runs one outside a chain. `search` returns (or resolves to) the results; `ctx` is:
 
 | member                          | what it is                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
