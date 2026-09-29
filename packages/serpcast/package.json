@@ -1,6 +1,6 @@
 {
 	"name": "serpcast",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"description": "Keyless search engines over HTTP with a real browser's fingerprint (libcurl-impersonate), driven by recipes shared with searchcast, with an engine chain that falls back to a real browser.",
 	"license": "AGPL-3.0-only",
 	"keywords": [
