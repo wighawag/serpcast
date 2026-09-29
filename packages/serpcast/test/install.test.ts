@@ -315,8 +315,19 @@ describe('the only download path', () => {
 			readFileSync(join(src, file), 'utf8').includes(`from './${module}'`),
 		);
 
-	it('is install-libcurl: only install.ts downloads, and only the bin imports it', () => {
-		expect(importers('download.js')).toEqual(['install.ts']);
-		expect(importers('install.js')).toEqual(['cli.ts']);
+	it('is the explicit install commands: only install.ts and install-recipes.ts download, and only the bin imports them', () => {
+		expect(importers('download.js').sort()).toEqual([
+			'install-recipes.ts',
+			'install.ts',
+		]);
+		expect(importers('install-recipes.js')).toEqual(['cli.ts']);
+		// The others take only InstallError from install.ts.
+		expect(importers('install.js').sort()).toEqual([
+			'cli.ts',
+			'install-recipes.ts',
+			'recipe-archive.ts',
+		]);
+		expect(importers('recipe-archive.js')).toEqual(['install-recipes.ts']);
+		expect(importers('cli.js')).toEqual([]);
 	});
 });

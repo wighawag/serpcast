@@ -9,7 +9,7 @@ Getting keyless web search results today usually means running SearXNG. What Sea
 - Engines are tried as an ordered **engine chain**, first answer wins, with searchcast (a real browser) as the fallback when HTTP is blocked.
 - serpcast is **not** an anonymity tool, and it is built so one can use it safely: the caller injects the proxy, the state store and the recipe set; serpcast makes no network call the caller did not cause and writes nothing to disk on its own ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)).
 
-Status: in development (0.x; the API may still change between minor versions). The functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner, code recipes and browser engines (searchcast), with `serpcast query` for recipe development, `serpcast install-libcurl` to install the native library and `serpcast doctor` to check it.
+Status: in development (0.x; the API may still change between minor versions). The functionality lands task by task (see `work/tasks/`). Available so far: the engine chain with its state store, the transport, the declarative recipe runner, code recipes and browser engines (searchcast), with `serpcast query` for recipe development, `serpcast install-libcurl` to install the native library, `serpcast doctor` to check it, and `serpcast install-recipes` to install a checksum-pinned set of recipes.
 
 ## Packages
 
@@ -196,7 +196,7 @@ const {results} = await serpcast.search('some query', {engines: [myApi, loadReci
 
 The results are validated: an array of `{title, url, snippet?, ...}` with a non-empty `title` and `url` and every field a string (fields set to `undefined` are dropped). Anything else is a `recipe` error, and so is any throw that is not a `SerpcastError` (with the original as `cause`). `[]` is a valid answer: the module says the site has no results, and the chain stops there, so throw `recipeError` when the response is not one you understand. The whole search is bounded by `timeoutMs` (a `timeout` error); aborting the caller's `signal` rejects with its reason.
 
-serpcast ships no code recipe for a real site as part of the package: write your own, for engines whose terms allow automated access. The repo has one example to start from.
+serpcast ships no code recipe for a real site as part of the package: write your own, for engines whose terms allow automated access. The repo has one example to start from. To install a set of recipes someone publishes, see [Installing recipes](#installing-recipes-serpcast-install-recipes).
 
 ### Example: Marginalia Search
 
@@ -310,6 +310,47 @@ http2 hash:    52d84b11737d980aef856699f885ca86
 
 Raw JA3 changes on every connection by design (Chrome permutes its TLS extensions); JA3N, JA4 and the HTTP/2 string are the stable values to compare.
 
+## Installing recipes (`serpcast install-recipes`)
+
+A recipe repository can publish its recipes as one release archive, and `serpcast install-recipes` installs the whole set in one explicit command. Like `install-libcurl`, it runs only when you type it ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)): serpcast never looks for recipes, updates them or loads them on its own.
+
+```sh
+serpcast install-recipes <url|path> --sha256 <hex> [--name <set>] [--dir <path>] [--proxy <url>] [--force]
+serpcast recipes list [--dir <path>]
+```
+
+**`--sha256` is required, for a URL and a local file alike.** Code recipes are code with full Node access (see [Code recipes](#code-recipes)), so the pinned checksum is your trust decision: it says "exactly these bytes, which I have reviewed or whose publisher I trust". Get it from the publisher through a channel you trust, or compute it yourself (`sha256sum set.tar.gz`) after reviewing the archive. There is no way to install without one.
+
+- The source is an `http://` or `https://` URL (downloaded with the same downloader as `install-libcurl`: through `--proxy` if given, with proxy environment variables ignored, no redirect from https to http, at most 16 MiB) or a path to a local file (`--proxy` is refused with a file, since it would not be used).
+- The archive's sha256 is checked **before** anything is unpacked. It is unpacked in-process (no `tar` binary) and validated as a whole before anything is written (see the format below): one bad entry fails the install.
+- The set goes into `<set>/` under the recipes directory, which is `recipes/` in the data directory (`$XDG_DATA_HOME/serpcast/recipes`, by default `~/.local/share/serpcast/recipes`), or `--dir`. The set's name is `--name` if given, else the `name` in the archive's `manifest.json`, else the command fails. Names are letters, digits, `.`, `_` and `-`, starting with a letter or digit.
+- The set is written to a temporary directory beside its destination and renamed into place, so an interrupted install leaves the previous set or nothing, never a partial one. Beside the recipes it writes `.source.json`: the source given, the URL after redirects, the archive's sha256, the manifest's name and version, each file's sha256 and the install time.
+- If a set with that name exists: an identical one (same files, same bytes) is left alone (exit 0); a different one is kept and the command fails, unless `--force` replaces it (the whole set: files the new archive lacks are removed).
+- It prints what it downloads or reads, the verified checksum, and each installed file with its own sha256 on stderr, and the set's directory alone on stdout. A failure is `serpcast: <message>` on stderr, exit 1, and installs nothing; a missing `--sha256` is a usage error (exit 2).
+
+`serpcast recipes list` shows each installed set: its directory, the manifest's name and version, the source and sha256 recorded at install, and its files with their sha256. It makes no network request.
+
+To use an installed set, load its files yourself: `recipesDir(env?)` (exported from `serpcast`) returns the recipes directory, so `join(recipesDir(), 'my-set', 'web.json')` goes to `loadRecipeFile` and `join(recipesDir(), 'my-set', 'api.mjs')` to `loadCodeRecipe`. Which files are engines is up to you (a set may hold helper modules, and it holds its `manifest.json`).
+
+### Release archive format
+
+What a recipe repository's release asset must be:
+
+- A gzipped tar (`.tar.gz`) of at most 16 MiB (64 MiB unpacked).
+- Only regular files named `*.mjs`, `*.js` or `*.json`: declarative recipes, code recipes and modules they import. Prefer `.mjs` for code, since the installed set has no `package.json` to say `.js` is ESM.
+- All files at the archive's root, or all under one top-level directory (such as `my-set-1.2.0/`), with no deeper directories. Directory entries for the root and that one directory are fine.
+- Optionally a `manifest.json` `{"name": "my-set", "version": "1.2.0"}`: `name` is the default set name, and both are shown by `recipes list`. It is installed with the set.
+- Nothing else. Absolute paths, `..`, symlinks and hard links, device files, hidden files (a leading `.`, which includes macOS `._*` files and the reserved `.source.json`), nested directories, other file types or the same file twice each fail the whole install, naming the entry.
+
+For example, from a directory holding the recipes: `tar czf my-set-1.2.0.tar.gz my-set/` (GNU tar; on macOS set `COPYFILE_DISABLE=1`), or `git archive --format=tar.gz --prefix=my-set/ -o my-set-1.2.0.tar.gz HEAD:recipes` for a `recipes/` folder of a git repository. GitHub's automatic "Source code" archives hold the whole repository (README, license, ...) and are refused: publish a dedicated asset, and its sha256 with it.
+
+**A private GitHub release asset needs authentication**, which `install-recipes` does not do (it sends no credentials). Download it with the GitHub CLI and install the file:
+
+```sh
+gh release download v1.2.0 --repo owner/recipes --pattern 'my-set-1.2.0.tar.gz'
+serpcast install-recipes ./my-set-1.2.0.tar.gz --sha256 <hex>
+```
+
 ## CLI: `serpcast query`
 
 For recipe development, `serpcast query` runs one declarative recipe once through the impersonated transport:
@@ -326,7 +367,7 @@ The words after the options are joined into one query. The library is found as d
 |       `1` | The search failed: `serpcast: <kind>: <message>` on stderr, where `<kind>` is the `SerpcastError` kind. An unreadable or invalid recipe file is `recipe`.  |
 |       `2` | A usage error (unknown command or option, missing `--recipe` or query): the message and the usage on stderr.                                                |
 
-`install-libcurl` and `doctor` use the same exit codes: `0` success, `1` a failed install (`serpcast: <message>` on stderr) or an unhealthy `doctor` report, `2` a usage error.
+`install-libcurl`, `install-recipes`, `recipes list` and `doctor` use the same exit codes: `0` success, `1` a failed install (`serpcast: <message>` on stderr) or an unhealthy `doctor` report, `2` a usage error.
 
 ## Size discipline (per-module LOC)
 
@@ -351,20 +392,24 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 | `src/serpcast.ts`    | 243 |    260 |
 | `src/browser.ts`     | 233 |    250 |
 | `src/declarative.ts` | 200 |    220 |
-| `src/install.ts`     | 167 |    180 |
+| `src/install.ts`     | 147 |    180 |
+| `src/install-recipes.ts` | 241 |    250 |
+| `src/recipe-archive.ts` | 120 |    130 |
+| `src/recipes.ts`     |  96 |    100 |
+| `src/tar.ts`         |  48 |     60 |
 | `src/cookies.ts`     | 155 |    170 |
 | `src/post.ts`        | 146 |    160 |
 | `src/searchcast-endpoint.ts` | 154 |    170 |
 | `src/doctor.ts`      | 153 |    170 |
-| `src/cli.ts`         | 135 |    150 |
+| `src/cli.ts`         | 179 |    180 |
 | `src/html.ts`        | 126 |    150 |
 | `src/chrome.ts`      | 361 |    150 |
-| `src/index.ts`       | 122 |    120 |
+| `src/index.ts`       | 135 |    120 |
 | `src/response.ts`    |  98 |    120 |
 | `src/store.ts`       |  63 |     80 |
 | `src/errors.ts`      |  36 |     40 |
 
-**Total own source: 3145 LOC** (excluding deps).
+**Total own source: 4997 LOC** (excluding deps).
 
 ## Develop
 

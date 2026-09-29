@@ -130,7 +130,11 @@ export function realDataDirs(): () => unknown[] {
 			? [join(process.env.XDG_DATA_HOME, 'serpcast')]
 			: []),
 	];
-	const files = dirs.flatMap((d) => [d, join(d, 'libcurl-impersonate.so')]);
+	const files = dirs.flatMap((d) => [
+		d,
+		join(d, 'libcurl-impersonate.so'),
+		join(d, 'recipes'),
+	]);
 	return () =>
 		files.map((f) => (existsSync(f) ? statSync(f).mtimeMs : 'absent'));
 }

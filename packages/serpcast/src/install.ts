@@ -20,9 +20,9 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import {join} from 'node:path';
-import {gunzipSync} from 'node:zlib';
 import {describeProxy, download} from './download.js';
 import {dataDir, LIBCURL_IMPERSONATE, libraryFileName} from './libcurl.js';
+import {readTarGz, type TarEntry} from './tar.js';
 
 /** A pinned release: the shape of `LIBCURL_IMPERSONATE`. */
 export interface Release {
@@ -135,33 +135,13 @@ export async function installLibcurl(
 
 /** The regular file `name` in a .tar.gz, or undefined. */
 export function extract(targz: Buffer, name: string): Buffer | undefined {
-	let tar: Buffer;
+	let entries: TarEntry[];
 	try {
-		tar = gunzipSync(targz, {maxOutputLength: MAX_UNPACKED_BYTES});
+		entries = readTarGz(targz, MAX_UNPACKED_BYTES);
 	} catch (cause) {
-		throw new InstallError('the archive is not a readable .tar.gz', {cause});
+		throw new InstallError((cause as Error).message, {cause});
 	}
-	const text = (start: number, length: number, from = tar) =>
-		from
-			.subarray(start, start + length)
-			.toString('utf8')
-			.replace(/\0.*$/s, '');
-	let longName: string | undefined;
-	for (let offset = 0; offset + 512 <= tar.length;) {
-		if (tar.subarray(offset, offset + 512).every((b) => b === 0)) break;
-		const size = parseInt(text(offset + 124, 12).trim() || '0', 8);
-		const type = text(offset + 156, 1) || '0';
-		const prefix = text(offset + 345, 155);
-		const path = longName ?? (prefix ? `${prefix}/` : '') + text(offset, 100);
-		const body = tar.subarray(offset + 512, offset + 512 + size);
-		longName = undefined;
-		if (type === 'L') longName = text(0, size, body);
-		else if (type === 'x')
-			longName = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(body.toString('utf8'))?.[1];
-		else if (type === '0' && path.replace(/^\.\//, '') === name) {
-			return Buffer.from(body);
-		}
-		offset += 512 + Math.ceil(size / 512) * 512;
-	}
-	return undefined;
+	return entries.find(
+		(entry) => entry.type === '0' && entry.path.replace(/^\.\//, '') === name,
+	)?.body;
 }

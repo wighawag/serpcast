@@ -3,7 +3,10 @@
 // through the impersonated transport (recipe development); `install-libcurl`
 // downloads the pinned library into the data directory, the only download
 // serpcast ever makes and only when typed; `doctor` reports the library and
-// whether impersonation is active (no network request without `--remote`).
+// whether impersonation is active (no network request without `--remote`);
+// `install-recipes` installs a recipe set from a checksum-pinned archive (a
+// URL is downloaded only then, and only when typed); `recipes list` shows the
+// installed sets.
 //
 // Exit codes: 0 on success (for `query`, `{recipe, results}` as JSON on
 // stdout, results empty only when the recipe's `empty` selector matched); 1 on
@@ -22,12 +25,16 @@ import {
 } from './index.js';
 import {doctor, formatReport, healthy} from './doctor.js';
 import {InstallError, installLibcurl} from './install.js';
+import {installRecipes} from './install-recipes.js';
+import {formatRecipeSets, listRecipeSets, recipesDir} from './recipes.js';
 
 /** The options each command accepts (besides --help). */
 const COMMANDS: Record<string, string[]> = {
 	query: ['recipe', 'proxy', 'libcurl'],
 	'install-libcurl': ['proxy', 'force'],
 	doctor: ['libcurl', 'proxy', 'remote'],
+	'install-recipes': ['sha256', 'name', 'dir', 'proxy', 'force'],
+	recipes: ['dir'],
 };
 
 function usageError(message: string): never {
@@ -62,6 +69,9 @@ interface Values {
 	libcurl?: string;
 	force?: boolean;
 	remote?: boolean;
+	sha256?: string;
+	name?: string;
+	dir?: string;
 }
 
 async function installCommand(values: Values) {
@@ -71,6 +81,35 @@ async function installCommand(values: Values) {
 		log: (line) => process.stderr.write(`serpcast: ${line}\n`),
 	});
 	process.stdout.write(path + '\n');
+}
+
+async function installRecipesCommand(values: Values) {
+	const [source, ...extra] = values.positionals;
+	if (!source || extra.length) {
+		usageError('install-recipes takes one <url|path>');
+	}
+	if (!values.sha256) {
+		usageError(
+			"install-recipes needs --sha256 <hex>: pinning the archive's checksum is the trust decision",
+		);
+	}
+	const {dir} = await installRecipes(source, {
+		sha256: values.sha256,
+		name: values.name,
+		dir: values.dir,
+		proxy: values.proxy,
+		force: values.force,
+		log: (line) => process.stderr.write(`serpcast: ${line}\n`),
+	});
+	process.stdout.write(dir + '\n');
+}
+
+function recipesCommand(values: Values) {
+	if (values.positionals.join(' ') !== 'list') {
+		usageError('recipes takes one subcommand: list');
+	}
+	const base = values.dir ?? recipesDir();
+	process.stdout.write(formatRecipeSets(base, listRecipeSets(base)) + '\n');
 }
 
 async function doctorCommand(values: Values) {
@@ -95,6 +134,9 @@ async function main(argv: string[]): Promise<void> {
 				libcurl: {type: 'string'},
 				force: {type: 'boolean'},
 				remote: {type: 'boolean'},
+				sha256: {type: 'string'},
+				name: {type: 'string'},
+				dir: {type: 'string'},
 				help: {type: 'boolean', short: 'h'},
 			},
 		});
@@ -116,6 +158,8 @@ async function main(argv: string[]): Promise<void> {
 	}
 	const given = {positionals: rest, ...values};
 	if (command === 'query') return query(values.recipe, given);
+	if (command === 'install-recipes') return installRecipesCommand(given);
+	if (command === 'recipes') return recipesCommand(given);
 	if (rest.length) usageError(`${command} takes no arguments`);
 	if (command === 'install-libcurl') return installCommand(given);
 	return doctorCommand(given);
