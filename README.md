@@ -33,9 +33,27 @@ session.documentCookies.set(page.url, 'token=abc; Path=/'); // as the page's scr
 session.close(); // closes the session's connections (cookies are kept)
 ```
 
+`createTransport(options)` takes:
+
+| option                | default                                                     | meaning                                                                                                                                                                                                 |
+| --------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `libcurlPath`         | `SERPCAST_LIBCURL_PATH`, `LIBCURL_PATH`, the data directory | The libcurl-impersonate shared library (see Finding the library, below).                                                                                                                                |
+| `proxy`               | none (direct)                                               | The proxy for all traffic (`http://`, `socks5://`, `socks5h://`, see Proxy and DNS, below).                                                                                                             |
+| `strict`              | `true`                                                      | Refuse to send unless libcurl-impersonate accepts the pinned target (see Strict mode, below). A security guarantee: `false` sends with a non-browser fingerprint.                                        |
+| `timeoutMs`           | 15000 (15 s)                                                | Per-request time limit.                                                                                                                                                                                 |
+| `caPath`              | the library's default                                       | A PEM CA bundle to verify servers against.                                                                                                                                                              |
+| `maxBodyBytes`        | 16 MiB                                                      | Largest response body, before and after decoding; larger is a `transport` error.                                                                                                                        |
+| `reuseConnections`    | `true`                                                      | Keep a session's connections open between its requests, as Chrome does (see Connections, below). `false`: one connection per request, closed after it (serpcast 0.1's behaviour), so a session's requests are not linked at the connection level (its cookies still link them). |
+| `idlePollMs`          | 5                                                           | How long an in-flight request waits between two looks at sockets that had nothing to do, in ms. Lower costs more CPU per waiting request, higher adds up to that much latency to each network event.   |
+| `maxRequestBodyBytes` | 1 MiB (`MAX_REQUEST_BODY_BYTES`)                            | Largest POST body; larger is a `recipe` error and nothing is sent.                                                                                                                                      |
+| `preflightCache`      | `true`                                                      | Remember an allowed CORS preflight for its `access-control-max-age`, as Chrome does. `false`: preflight every such POST.                                                                                 |
+| `maxPreflightAgeS`    | 7200 (Chromium's cap)                                       | The longest a preflight is remembered, in seconds.                                                                                                                                                      |
+
+Every numeric option must be a positive finite number (a whole number for times in ms passed to libcurl, byte sizes and counts); anything else, or a boolean option that is not a boolean, throws a `RangeError` naming the option when the transport (or `createSerpcast`) is created. The defaults are the behaviour of earlier versions, so nothing changes unless you set an option.
+
 - **Header tables and `sec-fetch-site`.** `document` is a typed-URL navigation (`sec-fetch-site: none`) and `same-origin-navigation` a link click on the same origin. For `fetch` and `script`, `sec-fetch-site` is derived from the request URL relative to the `referer` (the page it comes from), as Chrome does: same scheme, host and port is `same-origin`; same scheme and registrable domain (any port) is `same-site` (`https://cdn.example.com` from `https://www.example.com`); anything else, `http` to `https` included, is `cross-site`. A request that is not same-origin sends only the page's origin as `referer` (Chrome's default referrer policy), a `fetch` adds `origin`, and a cross-site one adds `sec-fetch-storage-access: active`, as measured in `work/notes/findings/sec-fetch-site-by-initiator.md`. The registrable domain comes from a small built-in rule, not the public suffix list: the last two labels, or three under a two-letter TLD with a common second level (`example.co.uk`, `example.com.au`). It does not know private suffixes such as `github.io`, so pass `fetchSite: 'cross-site'` (or `'same-site'`, `'same-origin'`) when you know better: `session.request(url, {kind: 'script', referer, fetchSite: 'cross-site'})`.
-- **POST (`fetch` only).** `session.request(url, {kind: 'fetch', method: 'POST', referer, body, contentType})` sends a page's `fetch()` POST with Chrome's exact headers (`content-length` first, `content-type` after `sec-ch-ua`, `origin` always, same-origin included), as measured in `work/notes/findings/post-requests.md`. `body` is a string (UTF-8) or a `Uint8Array`, at most `MAX_REQUEST_BODY_BYTES` (1 MiB); `contentType` defaults as `fetch()` does (`text/plain;charset=UTF-8` for a string, none for bytes). When Chrome would send a CORS preflight first (another origin, same-site included, with a `content-type` that is not CORS-safelisted, such as `application/json`), the session sends it too: an `OPTIONS` without cookies, on a connection of its own (as Chrome keeps credential-less requests apart), remembered for its `access-control-max-age` (default 5 s). If the preflight does not allow the POST, the POST is not sent: a 202/403/429 answer is `blocked`, 404/410 `recipe`, another non-2xx `transport`, and CORS headers that do not allow it (`access-control-allow-origin` not the page's origin, no `access-control-allow-credentials: true`, `content-type` not allowed) are `recipe`. Navigation (form) POSTs are not offered.
-- **Connections.** A session keeps its connections open between its requests and reuses them, as Chrome does: one HTTP/2 connection per origin (concurrent requests to an origin wait for it rather than opening a second one), through the same proxy tunnel when there is a proxy. Connections are never shared between sessions: sessions (two engines, two callers) must stay unlinkable, and a shared connection would link them at the TLS and IP layer. `session.close()` closes them (at once when idle, else when the requests in flight settle); a later request opens a new one. An idle session keeps nothing running, so it never keeps the process alive.
+- **POST (`fetch` only).** `session.request(url, {kind: 'fetch', method: 'POST', referer, body, contentType})` sends a page's `fetch()` POST with Chrome's exact headers (`content-length` first, `content-type` after `sec-ch-ua`, `origin` always, same-origin included), as measured in `work/notes/findings/post-requests.md`. `body` is a string (UTF-8) or a `Uint8Array`, at most `maxRequestBodyBytes` (default `MAX_REQUEST_BODY_BYTES`, 1 MiB); `contentType` defaults as `fetch()` does (`text/plain;charset=UTF-8` for a string, none for bytes). When Chrome would send a CORS preflight first (another origin, same-site included, with a `content-type` that is not CORS-safelisted, such as `application/json`), the session sends it too: an `OPTIONS` without cookies, on a connection of its own (as Chrome keeps credential-less requests apart), remembered for its `access-control-max-age` (default 5 s, at most `maxPreflightAgeS`; `preflightCache: false` remembers none). If the preflight does not allow the POST, the POST is not sent: a 202/403/429 answer is `blocked`, 404/410 `recipe`, another non-2xx `transport`, and CORS headers that do not allow it (`access-control-allow-origin` not the page's origin, no `access-control-allow-credentials: true`, `content-type` not allowed) are `recipe`. Navigation (form) POSTs are not offered.
+- **Connections.** A session keeps its connections open between its requests and reuses them, as Chrome does: one HTTP/2 connection per origin (concurrent requests to an origin wait for it rather than opening a second one), through the same proxy tunnel when there is a proxy. Connections are never shared between sessions: sessions (two engines, two callers) must stay unlinkable, and a shared connection would link them at the TLS and IP layer. `session.close()` closes them (at once when idle, else when the requests in flight settle); a later request opens a new one. An idle session keeps nothing running, so it never keeps the process alive. With `reuseConnections: false`, each request (a preflight included) opens its own connection and closes it when it settles.
 
 - **Proxy and DNS.** The proxy URL (`http://`, `socks5://`, `socks5h://`) is passed to libcurl as given, and its scheme decides where DNS is resolved: **`socks5h://` resolves host names at the proxy, `socks5://` resolves them locally**, on this host. Callers that want no local DNS must pass `socks5h://`. With no proxy, the connection is direct: libcurl's proxy environment variables (`http_proxy`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) are ignored, so the caller's option is the only egress policy.
 - **Finding the library.** In order: the `libcurlPath` option, `SERPCAST_LIBCURL_PATH`, `LIBCURL_PATH`, then `libcurl-impersonate.so` (`.dylib`, `.dll`) in serpcast's data directory (`$XDG_DATA_HOME/serpcast/`, default `~/.local/share/serpcast/`), where [`serpcast install-libcurl`](#installing-libcurl-impersonate) puts it. Nothing else is searched, and the library is never downloaded as a side effect: only that command, typed by you, downloads it. The pinned release and its checksums are `LIBCURL_IMPERSONATE` (libcurl-impersonate 2.1.1). The library is loaded once per process, so its path is process-global: a second instance asking for a different path fails with an `impersonation` error.
@@ -65,17 +83,20 @@ await serpcast.clearSessions(); // or clearSessions('first'), by engine name
 await serpcast.close(); // closes engine connections, stops a library-mode browser if one was started
 ```
 
-`createSerpcast(options)` takes the transport options (`libcurlPath`, `proxy`, `strict`, `timeoutMs`, `caPath`, `maxBodyBytes`, see above) plus:
+`createSerpcast(options)` takes the [transport options](#transport-libcurl-impersonate) (`libcurlPath`, `proxy`, `strict`, `timeoutMs`, `caPath`, `maxBodyBytes`, `reuseConnections`, `idlePollMs`, `maxRequestBodyBytes`, `preflightCache`, `maxPreflightAgeS`; checked even when a `transport` is injected, though they then do not apply) plus the options below, checked the same way (a `RangeError` at creation):
 
 | option          | default                            | meaning                                                                                               |
 | --------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `store`         | in memory                          | The state store for sessions and cooldowns (below).                                                   |
-| `cooldownMs`    | 5 minutes                          | How long an engine that answered `blocked` is skipped (`DEFAULT_COOLDOWN_MS`).                        |
+| `cooldownMs`    | 5 minutes                          | How long an engine that answered `blocked` is skipped (`DEFAULT_COOLDOWN_MS`). `0`: no cooldown.      |
 | `sessionIdleMs` | 10 minutes                         | An engine's session is dropped after this long without a search using it (`DEFAULT_SESSION_IDLE_MS`). |
 | `now`           | `Date.now`                         | The clock for cooldowns and sessions (and the default store).                                         |
 | `transport`     | created from the transport options | A transport to use instead (tests, or sharing one between instances).                                 |
 | `searchcast`    | none                               | How library-mode [browser engines](#browser-engines-searchcast) start searchcast.                     |
-| `decoyGuard`    | none                               | The engines (by name) whose answers are checked for [decoys](#decoy-guard), e.g. `['bing']`, on top of those whose recipe declares `decoyProne: true`. |
+| `decoyGuard`    | none                               | The engines (by name) whose answers are checked for [decoys](#decoy-guard), e.g. `['bing']`, on top of those whose recipe declares `decoyProne: true`. Or `{include?: string[], exclude?: string[]}`: `include` is the array form, `exclude` names engines never checked, even when their recipe declares `decoyProne` (exclude wins). |
+| `decoyRule`     | `{top: 5, maxRelevant: 1, prefix: 5}` (`DEFAULT_DECOY_RULE`) | The [decoy rule](#decoy-guard)'s thresholds, each a positive whole number; set any of them. The defaults are the measured values: changing them is at your own risk. |
+| `keepSessions`  | `true`                             | Keep each HTTP engine's transport session (its open connections) in memory between searches (see Sessions, below). `false`: every search opens new connections and closes them after; cookies and state still go through the store. |
+| `maxRedirects`  | 20 (Chrome's limit)                | How many redirects a declarative recipe follows; one more is a `transport` error. `0` follows none.   |
 
 `search(query, {engines, maxResults?, signal?})`: an engine is a declarative recipe, a [code recipe](#code-recipes) or a [browser engine](#browser-engines-searchcast), identified by its `name`. `maxResults` cuts the answer (each recipe's `limit` still applies). How each outcome is handled:
 
@@ -90,13 +111,13 @@ await serpcast.close(); // closes engine connections, stops a library-mode brows
 
 Some engines, Bing above all, answer some queries with a well-formed page of results unrelated to the query: a **decoy** (dictionary entries for "why" in answer to a question about Git, a gaming guide for a Debian kernel query). Nothing in the page says so, so without a guard it is returned as the answer. Measured in September 2026, through serpcast and two plain Node clients side by side, Bing decoyed about half of realistic queries (natural-language questions, 4 to 6 term technical queries) from a residential IP and most of them over Tor. It decoyed the SAME queries for every client, and over Tor a given query decoyed on every repeat; an immediate retry rescued none of 16 decoys. A decoy is a property of the engine, the query and the moment, not of the client, so no transport fixes it.
 
-`decoyGuard: ['bing']` checks the answers of the engines it names (any kind: declarative, code or browser; off by default). An engine whose recipe declares `decoyProne: true` is checked without being named: the recipe's author knows whether the site serves decoys, and engine names are chosen by the caller, so naming them is fragile. A declarative recipe declares it in its JSON, a code recipe on its default export, and a library-mode browser engine inherits it from its recipe (an endpoint-mode browser engine has no recipe object here, so name it in `decoyGuard`). An engine is guarded when either holds; there is no option to switch the guard off for a decoy-prone recipe, pass it as `{...recipe, decoyProne: false}` instead. A decoy answer becomes a `decoy` failure and the chain moves on to the next engine. It starts **no cooldown**: decoys are per query, and cooling the engine would drop its good answers to other queries. The rule, `isDecoy(query, results)`, is exported so code recipes and callers can apply it themselves:
+`decoyGuard: ['bing']` checks the answers of the engines it names (any kind: declarative, code or browser; off by default). An engine whose recipe declares `decoyProne: true` is checked without being named: the recipe's author knows whether the site serves decoys, and engine names are chosen by the caller, so naming them is fragile. A declarative recipe declares it in its JSON, a code recipe on its default export, and a library-mode browser engine inherits it from its recipe (an endpoint-mode browser engine has no recipe object here, so name it in `decoyGuard`). An engine is guarded when either holds, unless it is named in `decoyGuard: {exclude: [...]}`, which switches the guard off for it (exclude wins over both; passing the engine as `{...recipe, decoyProne: false}` also works). A decoy answer becomes a `decoy` failure and the chain moves on to the next engine. It starts **no cooldown**: decoys are per query, and cooling the engine would drop its good answers to other queries. The rule, `isDecoy(query, results)`, is exported so code recipes and callers can apply it themselves:
 
 - The query's **terms** are its distinct words of 3 or more characters, minus a fixed list of function words and generic modifiers (`why`, `does`, `best`, `using`, ...).
 - A result is **relevant** when its title, snippet and URL together carry at least two distinct terms (or the only one), a term matching any word with the same first 5 characters ("replication" matches "replicate").
 - A page is a **decoy** when at most one of its top 5 results is relevant. A query with fewer than 2 terms, or a page with fewer than 3 results, is never judged. The whole answer is judged, before the `maxResults` cut.
 
-The rule is a port of a guard measured on a live deployment: it flagged every decoy seen and none of about 55 genuine pages.
+The rule is a port of a guard measured on a live deployment: it flagged every decoy seen and none of about 55 genuine pages. Those measured values (the top 5 results, at most 1 relevant, 5-character prefixes) are the defaults of `decoyRule`, and `isDecoy(query, results, rule?)` takes the same override. **Other values were not measured**: change them at your own risk. The stopword list, the 3-character term minimum and the never-judged floor (fewer than 2 terms or 3 results) are not options.
 
 ### State store
 
@@ -114,11 +135,11 @@ interface StateStore {
 
 serpcast namespaces its keys per engine name: `engine/<name>/session` (the engine's cookies and last use) and `engine/<name>/cooldown` (when it ends), with `<name>` URL-encoded, plus `serpcast/sessions`, the list of engines with a session (so `clearSessions()` finds them in any store). Every value carries the time serpcast relies on and is checked with serpcast's clock, and every `set` passes a `ttlMs` so the store can drop it; a store that expires late is still correct. Give each identity its own store (or key prefix) to keep their sessions apart.
 
-**Sessions.** Each engine gets a transport session whose cookies (and, for a code recipe, its `ctx.session` state) are loaded from the store before the engine runs and saved after, whatever the outcome (a challenge page may set the cookie that lets the next attempt through). A session unused for `sessionIdleMs` is dropped, and `clearSessions(engine?)` drops one engine's session or all of them. Two concurrent searches on the same engine each save their own cookies; the last save wins. The instance also keeps each engine's transport session between searches, so the next search reuses its open connections (never another engine's); they are closed when the engine's session is dropped (idle for `sessionIdleMs`, `clearSessions()`, or `close()`), or when the store holds other cookies for it (another instance saved them). An engine's connections never keep the process alive.
+**Sessions.** Each engine gets a transport session whose cookies (and, for a code recipe, its `ctx.session` state) are loaded from the store before the engine runs and saved after, whatever the outcome (a challenge page may set the cookie that lets the next attempt through). A session unused for `sessionIdleMs` is dropped, and `clearSessions(engine?)` drops one engine's session or all of them. Two concurrent searches on the same engine each save their own cookies; the last save wins. The instance also keeps each engine's transport session between searches, so the next search reuses its open connections (never another engine's); they are closed when the engine's session is dropped (idle for `sessionIdleMs`, `clearSessions()`, or `close()`), or when the store holds other cookies for it (another instance saved them). An engine's connections never keep the process alive. With `keepSessions: false` the instance keeps none: each search makes a new transport session from the store's cookies and closes it when the engine is done.
 
 ## Declarative recipes over HTTP
 
-`runDeclarativeRecipe(recipe, query, {session, signal?})` runs one [declarative recipe](packages/serpcast-recipe) (the same JSON file searchcast runs in a real browser) over the transport, with searchcast's semantics except that no script from the page runs:
+`runDeclarativeRecipe(recipe, query, {session, signal?, maxRedirects?})` runs one [declarative recipe](packages/serpcast-recipe) (the same JSON file searchcast runs in a real browser) over the transport, with searchcast's semantics except that no script from the page runs:
 
 ```ts
 import {createTransport, runDeclarativeRecipe} from 'serpcast';
@@ -133,7 +154,7 @@ const {recipe, results} = await runDeclarativeRecipe(
 // results: [{title, url, snippet?, ...extra fields}]
 ```
 
-It requests `navigate.url` (`{query}` replaced by the URL-encoded query) as a typed-URL document navigation, follows redirects itself (at most 20, each hop through the session so cookies apply), then decides on the final response, in this order:
+It requests `navigate.url` (`{query}` replaced by the URL-encoded query) as a typed-URL document navigation, follows redirects itself (at most `maxRedirects`, default 20, each hop through the session so cookies apply), then decides on the final response, in this order:
 
 1. HTTP 202, 403 or 429, a `blockedUrl` pattern matching the final URL, or a `blocked` selector matching the page: a `blocked` error.
 2. Any other non-2xx status: 404 and 410 are `recipe` errors (the URL template is wrong), everything else is a `transport` error. The status is in the message.
@@ -263,7 +284,7 @@ const engines = [
 ];
 ```
 
-`endpoint` is an `http://` (or `https://`) URL or an absolute Unix socket path; `recipe` is the recipe's name on that server (default: the engine's `name`); `timeoutMs` bounds the whole request (default 30 s, twice a recipe's default, to leave room for a cold browser start). **In endpoint mode serpcast cannot control the browser's egress**: the searchcast service uses its own `--proxy`, and serpcast's `proxy` does not apply to it (nor to the request to the endpoint, which goes straight to it). The caller must configure the service's egress to match.
+`endpoint` is an `http://` (or `https://`) URL or an absolute Unix socket path; `recipe` is the recipe's name on that server (default: the engine's `name`); `timeoutMs` bounds the whole request (default 30 s, twice a recipe's default, to leave room for a cold browser start); `maxBodyBytes` is the largest answer accepted (default 16 MiB; larger is a `transport` error). Both are per engine, and a value that is not a positive whole number makes the engine fail with a `recipe` error (a misconfigured engine). **In endpoint mode serpcast cannot control the browser's egress**: the searchcast service uses its own `--proxy`, and serpcast's `proxy` does not apply to it (nor to the request to the endpoint, which goes straight to it). The caller must configure the service's egress to match.
 
 **Errors.** searchcast answers both `blocked` and `recipe` with HTTP 502, so serpcast maps the answer's `error` field, not the status (in library mode, the thrown error's `code`):
 
@@ -353,6 +374,37 @@ gh release download v1.2.0 --repo owner/recipes --pattern 'my-set-1.2.0.tar.gz'
 serpcast install-recipes ./my-set-1.2.0.tar.gz --sha256 <hex>
 ```
 
+## Install API for embedders (`serpcast/install`)
+
+An application that embeds serpcast (webveil, for example) can offer serpcast's install steps itself, so its users install one thing. The installers and reports behind the CLI are exported from a **separate entry**, `serpcast/install`, never from `serpcast`: importing `serpcast` reaches no download code (a test walks its imports), and nothing is downloaded unless your code calls an installer ([ADR 0002](docs/adr/0002-policy-free-caller-injects-egress-state-recipes.md)).
+
+```ts
+import {doctor, healthy, installLibcurl, installRecipes, listRecipeSets, recipesDir} from 'serpcast/install';
+
+if (!healthy(await doctor())) await installLibcurl({proxy: 'socks5h://127.0.0.1:9050'});
+await installRecipes('https://example.com/my-set-1.2.0.tar.gz', {sha256: '<hex>', proxy: 'socks5h://127.0.0.1:9050'});
+console.log(listRecipeSets(recipesDir()));
+```
+
+| export | what it is |
+| ------ | ---------- |
+| `installLibcurl(options?)` | `serpcast install-libcurl`: resolves to `{path, url, status}` (`installed`, `replaced` or `unchanged`); options `proxy`, `force`, `env`, `log`, `maxArchiveBytes`, `maxUnpackedBytes`. |
+| `installRecipes(source, options)` | `serpcast install-recipes`: resolves to `{name, dir, files, status}`; options `sha256` (required), `name`, `dir`, `proxy`, `force`, `env`, `log`, `maxArchiveBytes`, `maxUnpackedBytes`. |
+| `listRecipeSets(base)`, `formatRecipeSets(base, sets)`, `recipesDir(env?)` | `serpcast recipes list`: the installed sets with their `.source.json` record, and the text the CLI prints. |
+| `doctor(options?)`, `healthy(report)`, `formatReport(report, proxy?)` | `serpcast doctor`: the report (`{pinned, target, library?, impersonating, problem?, remote?}`), whether it is all good, and the text the CLI prints; options `libcurlPath`, `proxy`, `remote`, `env`. |
+| `InstallError` | What a failed install rejects with; nothing was installed. |
+| `LIBCURL_IMPERSONATE`, `dataDir(env?)`, `ECHO_URL` | The pinned release, serpcast's data directory, the echo service `remote` asks. |
+| `MAX_LIBCURL_ARCHIVE_BYTES`, `MAX_LIBCURL_UNPACKED_BYTES`, `MAX_RECIPES_ARCHIVE_BYTES`, `MAX_RECIPES_UNPACKED_BYTES` | The installers' size caps (below). |
+
+Everything the CLI guarantees holds here too, with no switch to turn it off: the pinned checksums (the libcurl release's, and the `sha256` you pass for recipes), the archive validation, and the caller's proxy as the only egress. The size caps are safety ceilings:
+
+| option (both installers) | default and ceiling | meaning |
+| ------------------------ | ------------------- | ------- |
+| `maxArchiveBytes`        | 128 MiB (libcurl), 16 MiB (recipes) | Largest archive downloaded or read. |
+| `maxUnpackedBytes`       | 512 MiB (libcurl), 64 MiB (recipes) | Largest archive once unpacked. |
+
+A cap can be lowered, never raised: a value above the ceiling, or one that is not a positive whole number, rejects with a `RangeError` before anything is requested. An archive over a cap fails the install (`InstallError`) and installs nothing.
+
 ## CLI: `serpcast query`
 
 For recipe development, `serpcast query` runs one declarative recipe once through the impersonated transport:
@@ -389,29 +441,32 @@ Every module stays small with one responsibility. Per-module LOC is tracked here
 | ------------------ | --: | -----: |
 | `src/code.ts`        | 407 |    320 |
 | `src/download.ts`    | 290 |    300 |
-| `src/transport.ts`   | 604 |    300 |
+| `src/transport.ts`   | 680 |    300 |
 | `src/libcurl.ts`     | 272 |    280 |
-| `src/serpcast.ts`    | 243 |    260 |
-| `src/browser.ts`     | 233 |    250 |
-| `src/declarative.ts` | 200 |    220 |
-| `src/install.ts`     | 147 |    180 |
-| `src/install-recipes.ts` | 241 |    250 |
-| `src/recipe-archive.ts` | 120 |    130 |
+| `src/serpcast.ts`    | 454 |    260 |
+| `src/browser.ts`     | 235 |    250 |
+| `src/declarative.ts` | 197 |    220 |
+| `src/install.ts`     | 174 |    180 |
+| `src/install-recipes.ts` | 261 |    250 |
+| `src/recipe-archive.ts` | 124 |    130 |
 | `src/recipes.ts`     |  96 |    100 |
-| `src/tar.ts`         |  48 |     60 |
+| `src/tar.ts`         |  53 |     60 |
 | `src/cookies.ts`     | 245 |    170 |
-| `src/post.ts`        | 146 |    160 |
-| `src/searchcast-endpoint.ts` | 154 |    170 |
+| `src/post.ts`        | 148 |    160 |
+| `src/searchcast-endpoint.ts` | 178 |    170 |
 | `src/doctor.ts`      | 153 |    170 |
 | `src/cli.ts`         | 179 |    180 |
 | `src/html.ts`        | 126 |    150 |
 | `src/chrome.ts`      | 361 |    150 |
-| `src/index.ts`       | 140 |    120 |
+| `src/index.ts`       | 141 |    120 |
 | `src/response.ts`    |  98 |    120 |
 | `src/store.ts`       |  63 |     80 |
 | `src/errors.ts`      |  36 |     40 |
+| `src/decoy.ts`       | 110 |    120 |
+| `src/options.ts`     |  67 |     80 |
+| `src/install-api.ts` |  41 |     60 |
 
-**Total own source: 5144 LOC** (excluding deps).
+**Total own source: 5237 LOC** (`packages/serpcast/src`) (excluding deps).
 
 ## Develop
 

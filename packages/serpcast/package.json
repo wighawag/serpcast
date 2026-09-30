@@ -34,6 +34,10 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"default": "./dist/index.js"
+		},
+		"./install": {
+			"types": "./dist/install-api.d.ts",
+			"default": "./dist/install-api.js"
 		}
 	},
 	"files": [

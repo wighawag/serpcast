@@ -314,20 +314,80 @@ describe('the only download path', () => {
 		readdirSync(src).filter((file) =>
 			readFileSync(join(src, file), 'utf8').includes(`from './${module}'`),
 		);
+	/** Every source module `entry` reaches through its static imports (and re-exports). */
+	const reached = (entry: string) => {
+		const seen = new Set<string>();
+		const visit = (file: string) => {
+			if (seen.has(file)) return;
+			seen.add(file);
+			const text = readFileSync(join(src, file), 'utf8');
+			for (const [, module] of text.matchAll(/from '\.\/([\w-]+)\.js'/g))
+				visit(`${module}.ts`);
+		};
+		visit(entry);
+		return seen;
+	};
 
-	it('is the explicit install commands: only install.ts and install-recipes.ts download, and only the bin imports them', () => {
+	it('is the explicit install commands: only install.ts and install-recipes.ts download, and only the bin and serpcast/install import them', () => {
 		expect(importers('download.js').sort()).toEqual([
 			'install-recipes.ts',
 			'install.ts',
 		]);
-		expect(importers('install-recipes.js')).toEqual(['cli.ts']);
+		expect(importers('install-recipes.js').sort()).toEqual([
+			'cli.ts',
+			'install-api.ts',
+		]);
 		// The others take only InstallError from install.ts.
 		expect(importers('install.js').sort()).toEqual([
 			'cli.ts',
+			'install-api.ts',
 			'install-recipes.ts',
 			'recipe-archive.ts',
 		]);
-		expect(importers('recipe-archive.js')).toEqual(['install-recipes.ts']);
+		expect(importers('recipe-archive.js').sort()).toEqual([
+			'install-api.ts',
+			'install-recipes.ts',
+		]);
 		expect(importers('cli.js')).toEqual([]);
+		expect(importers('install-api.js')).toEqual([]);
+	});
+
+	it('is never reached from the main entry (index.ts), only from serpcast/install and the bin', () => {
+		const main = reached('index.ts');
+		expect(main.has('transport.ts')).toBe(true); // the walk does follow imports
+		for (const module of [
+			'download.ts',
+			'install.ts',
+			'install-recipes.ts',
+			'install-api.ts',
+		])
+			expect(main.has(module), module).toBe(false);
+		expect(reached('install-api.ts').has('download.ts')).toBe(true);
+	});
+
+	it('serpcast/install is a package subpath with types, exporting the installers and reports', async () => {
+		const pkg = JSON.parse(
+			readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+		) as {exports: Record<string, {types: string; default: string}>};
+		expect(pkg.exports['./install']).toEqual({
+			types: './dist/install-api.d.ts',
+			default: './dist/install-api.js',
+		});
+		// Resolved by name, as an embedder imports it (the built package).
+		const api = (await import('serpcast/install')) as Record<string, unknown>;
+		for (const name of [
+			'installLibcurl',
+			'installRecipes',
+			'listRecipeSets',
+			'recipesDir',
+			'doctor',
+			'healthy',
+			'formatReport',
+			'InstallError',
+		])
+			expect(typeof api[name], name).toBe('function');
+		const main = (await import('serpcast')) as Record<string, unknown>;
+		for (const name of ['installLibcurl', 'installRecipes', 'doctor'])
+			expect(main[name], name).toBeUndefined();
 	});
 });

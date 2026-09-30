@@ -12,11 +12,13 @@
 //   and the chain moves on. No cooldown: a decoy is a property of (engine,
 //   query, moment), so cooling the engine would drop its good answers to
 //   other queries. The whole answer is judged, before the `maxResults` cut.
-//   An engine is guarded when it is named in `decoyGuard` OR its recipe
-//   declares `decoyProne: true` (a library-mode browser engine: its recipe's).
-//   There is no option to switch the guard off: the caller passes the engine
-//   with `decoyProne: false` (engines are plain objects) or edits the recipe.
-//   Decisions: work/notes/observations/2026-09-29-decoy-prone-recipes-decisions.md.
+//   An engine is guarded when it is named in `decoyGuard` (its array form, or
+//   `include`) OR its recipe declares `decoyProne: true` (a library-mode
+//   browser engine: its recipe's), and not named in `decoyGuard.exclude`,
+//   which wins over both: the caller's off switch for a decoy-prone recipe.
+//   `decoyRule` overrides the rule's thresholds (the defaults are measured).
+//   Decisions: work/notes/observations/2026-09-29-decoy-prone-recipes-decisions.md
+//   and work/notes/observations/2026-09-30-tunables-and-install-api-decisions.md.
 // - The caller's abort rejects with the signal's reason and is not a failure.
 // - Any other error that is not a `SerpcastError` is a bug and is rethrown.
 //
@@ -41,7 +43,9 @@
 // idle expiry (checked at the next search, and by an unref'd timer after
 // `sessionIdleMs` without use), `clearSessions()`, or `close()`. The store
 // stays the only source of cookies and state. Connections are never shared
-// between engines (a transport session never shares them).
+// between engines (a transport session never shares them). With
+// `keepSessions: false` nothing is kept: each search runs on a new transport
+// session made from the store's cookies, closed when the engine is done.
 // Decisions: work/notes/observations/session-connection-reuse-decisions.md.
 // Decisions and alternatives: work/notes/observations/engine-chain-and-state-decisions.md.
 
@@ -54,11 +58,13 @@ import {
 } from './browser.js';
 import {isCodeRecipe, runCodeRecipe, type CodeRecipe} from './code.js';
 import type {StoredCookie} from './cookies.js';
-import {decoyTerms, isDecoy} from './decoy.js';
+import {decoyRule, decoyTerms, isDecoy, type DecoyRule} from './decoy.js';
 import {runDeclarativeRecipe, type SearchResult} from './declarative.js';
 import {SerpcastError, type EngineFailure} from './errors.js';
+import {checkBoolean, checkNames, checkNumber} from './options.js';
 import {createMemoryStore, type JsonValue, type StateStore} from './store.js';
 import {
+	checkTransportOptions,
 	createTransport,
 	type TransportOptions,
 	type TransportSession,
@@ -83,7 +89,7 @@ export interface ChainTransport {
 export interface SerpcastOptions extends TransportOptions {
 	/** Where sessions and cooldowns live. Default: in memory, per instance. */
 	store?: StateStore;
-	/** How long an engine that answered `blocked` is skipped, in ms. Default 5 minutes. */
+	/** How long an engine that answered `blocked` is skipped, in ms. Default 5 minutes; 0: no cooldown. */
 	cooldownMs?: number;
 	/** An engine's session (cookies and code-recipe state) is dropped after this long unused, in ms. Default 10 minutes. */
 	sessionIdleMs?: number;
@@ -97,9 +103,28 @@ export interface SerpcastOptions extends TransportOptions {
 	 * The engines (by name) whose answers are checked with `isDecoy`: a decoy
 	 * page is a `decoy` failure and the next engine is tried (no cooldown).
 	 * Engines whose recipe declares `decoyProne: true` are checked too, named
-	 * here or not. Default: none.
+	 * here or not. The object form adds `exclude`: engines never checked, even
+	 * when their recipe declares `decoyProne` or `include` names them (exclude
+	 * wins). An array is the same as `{include: array}`. Default: none.
 	 */
-	decoyGuard?: readonly string[];
+	decoyGuard?: readonly string[] | DecoyGuard;
+	/** The decoy rule's thresholds (`isDecoy`). Default `DEFAULT_DECOY_RULE`, the measured values; others are at the caller's risk. */
+	decoyRule?: Partial<DecoyRule>;
+	/**
+	 * Keep each HTTP engine's transport session (its open connections) in
+	 * memory between searches. Default true. False: every search opens new
+	 * connections and closes them after; cookies and state still go through
+	 * the store.
+	 */
+	keepSessions?: boolean;
+	/** How many redirects a declarative recipe follows. Default 20 (Chrome's); 0 follows none. */
+	maxRedirects?: number;
+}
+
+/** `decoyGuard`'s object form: engines to check (`include`) and never to check (`exclude`, which wins). */
+export interface DecoyGuard {
+	include?: readonly string[];
+	exclude?: readonly string[];
 }
 
 export interface SearchOptions {
@@ -182,16 +207,45 @@ function decoyProne(engine: Engine): boolean {
 		: false;
 }
 
+/** `decoyGuard` in its object form, checked (a RangeError when malformed). */
+function decoyGuard(guard: SerpcastOptions['decoyGuard']): {
+	include: Set<string>;
+	exclude: Set<string>;
+} {
+	const object: DecoyGuard =
+		guard === undefined || Array.isArray(guard)
+			? {include: guard as readonly string[] | undefined}
+			: (guard as DecoyGuard);
+	if (typeof object !== 'object' || object === null)
+		throw new RangeError(
+			'serpcast: decoyGuard must be an array of engine names or {include?, exclude?}',
+		);
+	const include = checkNames('decoyGuard.include', object.include);
+	const exclude = checkNames('decoyGuard.exclude', object.exclude);
+	return {include: new Set(include), exclude: new Set(exclude)};
+}
+
 export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
+	checkTransportOptions(options); // even when a transport is injected: fail loud
+	checkNumber('cooldownMs', options.cooldownMs, {zero: true});
+	checkNumber('sessionIdleMs', options.sessionIdleMs);
+	checkNumber('maxRedirects', options.maxRedirects, {
+		integer: true,
+		zero: true,
+	});
+	checkBoolean('keepSessions', options.keepSessions);
+	const rule = decoyRule(options.decoyRule);
 	const now = options.now ?? Date.now;
 	const store = options.store ?? createMemoryStore({now});
 	const transport = options.transport ?? createTransport(options);
 	const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
 	const idleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
+	const keepSessions = options.keepSessions ?? true;
 	const browser = createBrowserRunner(options);
-	const named = new Set(options.decoyGuard ?? []);
+	const {include, exclude} = decoyGuard(options.decoyGuard);
 	const guarded = (engine: Engine) =>
-		named.has(engine.name) || decoyProne(engine);
+		!exclude.has(engine.name) &&
+		(include.has(engine.name) || decoyProne(engine));
 
 	type Session = ReturnType<ChainTransport['session']>;
 	/** Each HTTP engine's live transport session, kept for its connections; `uses` counts searches running on it. */
@@ -213,6 +267,7 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 	 * so concurrent searches keep their own cookies, as before.
 	 */
 	const acquire = (name: string, cookies: readonly StoredCookie[]) => {
+		if (!keepSessions) return transport.session(cookies); // closed by release
 		let entry = live.get(name);
 		if (entry && entry.uses > 0) return transport.session(cookies);
 		if (!entry || !sameCookies(entry.session.cookies(), cookies)) {
@@ -277,7 +332,11 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 						signal,
 						maxResults,
 					})
-				: await runDeclarativeRecipe(engine, query, {session, signal});
+				: await runDeclarativeRecipe(engine, query, {
+						session,
+						signal,
+						maxRedirects: options.maxRedirects,
+					});
 			return response.results;
 		} finally {
 			release(engine.name, session);
@@ -324,9 +383,9 @@ export function createSerpcast(options: SerpcastOptions = {}): Serpcast {
 				}
 				try {
 					const results = await run(engine, query, {signal, maxResults});
-					if (guarded(engine) && isDecoy(query, results)) {
+					if (guarded(engine) && isDecoy(query, results, rule)) {
 						const titles = results
-							.slice(0, 5)
+							.slice(0, rule.top)
 							.map((r) => JSON.stringify(r.title))
 							.join(', ');
 						const message = `${name}: decoy page, unrelated to the query terms ${decoyTerms(query).join(' ')} (top results: ${titles})`;

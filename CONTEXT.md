@@ -49,7 +49,7 @@ What a request is, from the browser's point of view, which selects its header ta
 _Avoid_: request type, mode
 
 **Preflight**:
-The CORS `OPTIONS` request Chrome sends before a fetch POST to another origin whose `content-type` is not CORS-safelisted (such as `application/json`). serpcast sends it too, as captured: credential-less, on the transport session's credential-less connections, remembered for its `access-control-max-age`. If it does not allow the POST, the POST is not sent.
+The CORS `OPTIONS` request Chrome sends before a fetch POST to another origin whose `content-type` is not CORS-safelisted (such as `application/json`). serpcast sends it too, as captured: credential-less, on the transport session's credential-less connections, remembered for its `access-control-max-age` (capped by `maxPreflightAgeS`; not at all with `preflightCache: false`). If it does not allow the POST, the POST is not sent.
 _Avoid_: OPTIONS check, CORS probe
 
 **Fetch site**:
@@ -71,7 +71,7 @@ One engine's cookies and arbitrary JSON state, kept in the state store and dropp
 _Avoid_: cookie jar, identity
 
 **Transport session**:
-The cookies and open connections that one engine's requests share. Cookies are stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it; they are the cookie half of a Session, exported as plain JSON so the state store can keep it. Its `documentCookies` are the same cookies as a page's `document.cookie` sees them (what a code recipe's `ctx.cookies` uses). Connections are kept open between its requests (as Chrome does) and never shared with another transport session; they live only in memory, closed with `close()` or when the engine chain drops the Session. Preflights go on a second, credential-less set of connections of the same transport session, as Chrome keeps credential-less requests apart.
+The cookies and open connections that one engine's requests share. Cookies are stored and sent by the transport itself (never libcurl's cookie engine) so the `cookie` header sits where Chrome puts it; they are the cookie half of a Session, exported as plain JSON so the state store can keep it. Its `documentCookies` are the same cookies as a page's `document.cookie` sees them (what a code recipe's `ctx.cookies` uses). Connections are kept open between its requests (as Chrome does; `reuseConnections: false` opens one per request instead) and never shared with another transport session; they live only in memory, closed with `close()` or when the engine chain drops the Session. Preflights go on a second, credential-less set of connections of the same transport session, as Chrome keeps credential-less requests apart.
 _Avoid_: cookie jar, client
 
 **Cooldown**:
@@ -95,7 +95,7 @@ The request or search did not finish within its time limit.
 The network or the server failed (connection error, unexpected status such as 5xx).
 
 **`decoy`**:
-A guarded engine (named in the caller's `decoyGuard`, or its recipe declares `decoyProne: true`) answered with a well-formed page of results unrelated to the query (the `isDecoy` rule). Recorded like any engine failure; starts NO cooldown, since a decoy is per query, not per engine.
+A guarded engine (named in the caller's `decoyGuard`, or its recipe declares `decoyProne: true`, and not in `decoyGuard.exclude`) answered with a well-formed page of results unrelated to the query (the `isDecoy` rule). Recorded like any engine failure; starts NO cooldown, since a decoy is per query, not per engine.
 
 **`impersonation`**:
 The browser fingerprint cannot be guaranteed (libcurl-impersonate missing, plain libcurl, unknown target). It aborts the whole search rather than falling through to later engines.

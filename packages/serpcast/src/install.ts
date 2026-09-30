@@ -1,6 +1,7 @@
 // `serpcast install-libcurl`: the ONLY code in serpcast that downloads the
-// native library, and it runs only when the user invokes that command (ADR
-// 0002; imported by cli.ts alone and not exported from the library). It
+// native library, and it runs only when the user invokes that command or an
+// embedder calls `installLibcurl` from `serpcast/install` (ADR 0002; imported
+// by cli.ts and install-api.ts, never reachable from the main entry). It
 // fetches the archive LIBCURL_IMPERSONATE pins for this platform (the same
 // constant CI installs from), through the caller's proxy only, verifies its
 // sha256 BEFORE writing anything, takes the one library file out of the
@@ -9,6 +10,11 @@
 // identical, and replaced only with `force` when it differs. The write is a
 // rename of a temporary file in the same directory, so a failure leaves either
 // the old file or nothing, never a partial library.
+//
+// The size caps (MAX_ARCHIVE_BYTES, MAX_UNPACKED_BYTES) are safety ceilings:
+// an embedder may LOWER them (`maxArchiveBytes`, `maxUnpackedBytes`), never
+// raise them. The idle timeout stays internal. Exported to embedders through
+// `serpcast/install` (install-api.ts), never from the main entry.
 
 import {createHash} from 'node:crypto';
 import {
@@ -22,6 +28,7 @@ import {
 import {join} from 'node:path';
 import {describeProxy, download} from './download.js';
 import {dataDir, LIBCURL_IMPERSONATE, libraryFileName} from './libcurl.js';
+import {checkNumber} from './options.js';
 import {readTarGz, type TarEntry} from './tar.js';
 
 /** A pinned release: the shape of `LIBCURL_IMPERSONATE`. */
@@ -44,6 +51,10 @@ export interface InstallOptions {
 	release?: Release;
 	/** Progress lines (what is downloaded from where, where it went). */
 	log?: (line: string) => void;
+	/** Largest archive downloaded, in bytes. Default and ceiling `MAX_ARCHIVE_BYTES` (128 MiB): may only be lowered. */
+	maxArchiveBytes?: number;
+	/** Largest unpacked archive, in bytes. Default and ceiling `MAX_UNPACKED_BYTES` (512 MiB): may only be lowered. */
+	maxUnpackedBytes?: number;
 }
 
 export interface InstallResult {
@@ -60,13 +71,25 @@ export class InstallError extends Error {
 	override name = 'InstallError';
 }
 
-const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
-const MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
+/** The ceiling (and default) of `installLibcurl`'s `maxArchiveBytes`. */
+export const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
+/** The ceiling (and default) of `installLibcurl`'s `maxUnpackedBytes`. */
+export const MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
 const IDLE_TIMEOUT_MS = 60_000;
 
 export async function installLibcurl(
 	options: InstallOptions = {},
 ): Promise<InstallResult> {
+	const maxArchiveBytes =
+		checkNumber('maxArchiveBytes', options.maxArchiveBytes, {
+			integer: true,
+			max: MAX_ARCHIVE_BYTES,
+		}) ?? MAX_ARCHIVE_BYTES;
+	const maxUnpackedBytes =
+		checkNumber('maxUnpackedBytes', options.maxUnpackedBytes, {
+			integer: true,
+			max: MAX_UNPACKED_BYTES,
+		}) ?? MAX_UNPACKED_BYTES;
 	const release: Release = options.release ?? LIBCURL_IMPERSONATE;
 	const log = options.log ?? (() => {});
 	const platform = `${process.platform}-${process.arch}`;
@@ -84,7 +107,7 @@ export async function installLibcurl(
 		log(`downloading ${url}${via}`);
 		archive = await download(url, {
 			proxy: options.proxy,
-			maxBytes: MAX_ARCHIVE_BYTES,
+			maxBytes: maxArchiveBytes,
 			idleTimeoutMs: IDLE_TIMEOUT_MS,
 		});
 	} catch (cause) {
@@ -102,7 +125,7 @@ export async function installLibcurl(
 	log(
 		`verified sha256 ${sha256} (pinned for libcurl-impersonate ${release.version} ${platform})`,
 	);
-	const library = extract(archive.body, asset.library);
+	const library = extract(archive.body, asset.library, maxUnpackedBytes);
 	if (!library) {
 		throw new InstallError(
 			`${asset.archive} has no file ${asset.library}. Nothing was installed.`,
@@ -134,10 +157,14 @@ export async function installLibcurl(
 }
 
 /** The regular file `name` in a .tar.gz, or undefined. */
-export function extract(targz: Buffer, name: string): Buffer | undefined {
+export function extract(
+	targz: Buffer,
+	name: string,
+	maxUnpackedBytes = MAX_UNPACKED_BYTES,
+): Buffer | undefined {
 	let entries: TarEntry[];
 	try {
-		entries = readTarGz(targz, MAX_UNPACKED_BYTES);
+		entries = readTarGz(targz, maxUnpackedBytes);
 	} catch (cause) {
 		throw new InstallError((cause as Error).message, {cause});
 	}

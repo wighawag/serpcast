@@ -12,7 +12,9 @@
 // Chrome keeps one HTTP/2 connection per origin. Connections are shared ONLY
 // within one session, never across sessions: sessions (two engines, two
 // callers) must stay unlinkable, and a shared connection would link them at
-// the TLS and IP layer. `close()` releases a session's connections. Decisions:
+// the TLS and IP layer. `close()` releases a session's connections. With
+// `reuseConnections: false` each request gets a multi handle of its own,
+// closed when it settles: one connection per request, nothing kept. Decisions:
 // work/notes/observations/session-connection-reuse-decisions.md.
 //
 // Egress: CURLOPT_PROXY is always set (to "" when the caller gave no proxy) and
@@ -34,8 +36,9 @@
 // origin, a `content-type` that is not CORS-safelisted), the session sends it
 // too, as Chrome does: without cookies, on a connection of its own (Chrome
 // keeps credential-less requests off the credentialed connection), and
-// remembers a successful one for its `access-control-max-age` (default 5 s)
-// per page origin and URL. A preflight the server does not allow stops the
+// remembers a successful one for its `access-control-max-age` (default 5 s,
+// at most `maxPreflightAgeS`) per page origin and URL, unless
+// `preflightCache: false` (then every such POST is preflighted). A preflight the server does not allow stops the
 // POST, as in the browser. Decisions:
 // work/notes/observations/2026-09-29-post-requests-decisions.md.
 
@@ -54,7 +57,14 @@ import {
 	type StoredCookie,
 } from './cookies.js';
 import {SerpcastError} from './errors.js';
-import {checkPreflight, postBody, type PostOptions} from './post.js';
+import {checkBoolean, checkNumber} from './options.js';
+import {
+	checkPreflight,
+	MAX_PREFLIGHT_AGE_S,
+	MAX_REQUEST_BODY_BYTES,
+	postBody,
+	type PostOptions,
+} from './post.js';
 import {respond, type TransportResponse} from './response.js';
 import {
 	assertImpersonation,
@@ -81,6 +91,38 @@ export interface TransportOptions {
 	caPath?: string;
 	/** Largest body accepted, before and after decoding, in bytes. Default 16 MiB. */
 	maxBodyBytes?: number;
+	/**
+	 * Keep a session's connections open between its requests, as Chrome does.
+	 * Default true. False: one connection per request (closed after it), for a
+	 * caller who does not want a session's requests linked at the connection
+	 * level (cookies still link them).
+	 */
+	reuseConnections?: boolean;
+	/** How long an in-flight request waits between two looks at idle sockets, in ms. Default 5. */
+	idlePollMs?: number;
+	/** Largest POST body, in bytes. Default `MAX_REQUEST_BODY_BYTES` (1 MiB). */
+	maxRequestBodyBytes?: number;
+	/** Remember an allowed CORS preflight for its `access-control-max-age`. Default true; false preflights every such POST. */
+	preflightCache?: boolean;
+	/** The longest a preflight is remembered, in seconds. Default 7200 (Chromium's cap). */
+	maxPreflightAgeS?: number;
+}
+
+/** 16 MiB: the default `maxBodyBytes`. */
+const MAX_BODY_BYTES = 16 * 1024 * 1024;
+
+/** `options` with every tuning value checked (a RangeError naming the first bad one). */
+export function checkTransportOptions(options: TransportOptions): void {
+	checkNumber('timeoutMs', options.timeoutMs, {integer: true});
+	checkNumber('maxBodyBytes', options.maxBodyBytes, {integer: true});
+	checkBoolean('strict', options.strict);
+	checkBoolean('reuseConnections', options.reuseConnections);
+	checkNumber('idlePollMs', options.idlePollMs);
+	checkNumber('maxRequestBodyBytes', options.maxRequestBodyBytes, {
+		integer: true,
+	});
+	checkBoolean('preflightCache', options.preflightCache);
+	checkNumber('maxPreflightAgeS', options.maxPreflightAgeS);
 }
 
 /**
@@ -181,12 +223,27 @@ const CURLMSG_DONE = 1;
  * timeout. Measured on Linux x64 (Node 24, 2026-09-29) with a server that
  * never answers: one idle in-flight request costs about 0.6% of one core, ten
  * about 1%. It adds at most 5 ms of latency to a network event that arrives
- * while idle.
+ * while idle. The default of the `idlePollMs` option: lower trades CPU for
+ * latency, higher the reverse.
  */
 const IDLE_POLL_MS = 5;
 
 export function createTransport(options: TransportOptions = {}): Transport {
+	checkTransportOptions(options);
 	const strict = options.strict ?? true;
+	const reuse = options.reuseConnections ?? true;
+	const idlePollMs = options.idlePollMs ?? IDLE_POLL_MS;
+	const maxAgeS = options.maxPreflightAgeS ?? MAX_PREFLIGHT_AGE_S;
+	const cachePreflights = options.preflightCache ?? true;
+	/** The session's connections, or (not reusing them) a set for one request, closed when it settles. */
+	const connect = (
+		curl: Libcurl,
+		kept: Connections | undefined,
+	): [Connections, (() => void) | undefined] => {
+		if (reuse) return [kept ?? new Connections(curl, idlePollMs), undefined];
+		const once = new Connections(curl, idlePollMs);
+		return [once, () => once.close()];
+	};
 	let ready: Promise<{curl: Libcurl; info: LibraryInfo}> | undefined;
 	const check = () => {
 		ready ??= (async () => {
@@ -231,7 +288,10 @@ export function createTransport(options: TransportOptions = {}): Transport {
 				},
 				async request(url, request) {
 					const target = parseUrl(url);
-					const post = postBody(request);
+					const post = postBody(
+						request,
+						options.maxRequestBodyBytes ?? MAX_REQUEST_BODY_BYTES,
+					);
 					const table = headerTable(request.kind, {
 						referer: request.referer,
 						url: target,
@@ -258,32 +318,45 @@ export function createTransport(options: TransportOptions = {}): Transport {
 						const key = `${origin} ${target.href}`;
 						if (!((preflights.get(key) ?? 0) > Date.now())) {
 							preflights.delete(key);
-							anonymous ??= new Connections(curl);
-							const answer = await perform(
-								curl,
-								anonymous,
-								info.impersonating,
-								target.href,
-								preflight,
-								options,
-								request,
-								{method: 'OPTIONS'},
-							);
-							const age = checkPreflight(answer, origin);
-							if (age > 0) preflights.set(key, Date.now() + age * 1000);
+							const [set, done] = connect(curl, anonymous);
+							if (!done) anonymous = set;
+							let answer;
+							try {
+								answer = await perform(
+									curl,
+									set,
+									info.impersonating,
+									target.href,
+									preflight,
+									options,
+									request,
+									{method: 'OPTIONS'},
+								);
+							} finally {
+								done?.();
+							}
+							const age = checkPreflight(answer, origin, maxAgeS);
+							if (age > 0 && cachePreflights)
+								preflights.set(key, Date.now() + age * 1000);
 						}
 					}
-					connections ??= new Connections(curl);
-					const response = await perform(
-						curl,
-						connections,
-						info.impersonating,
-						target.href,
-						table,
-						options,
-						request,
-						post ? {method: 'POST', body: post.body} : {method: 'GET'},
-					);
+					const [set, done] = connect(curl, connections);
+					if (!done) connections = set;
+					let response;
+					try {
+						response = await perform(
+							curl,
+							set,
+							info.impersonating,
+							target.href,
+							table,
+							options,
+							request,
+							post ? {method: 'POST', body: post.body} : {method: 'GET'},
+						);
+					} finally {
+						done?.();
+					}
 					jar.store(target, response.headers.getSetCookie());
 					return response;
 				},
@@ -326,7 +399,7 @@ async function perform(
 			'size_t serpcast_data_cb(void *ptr, size_t size, size_t n, void *user)',
 		),
 	);
-	const max = options.maxBodyBytes ?? 16 * 1024 * 1024;
+	const max = options.maxBodyBytes ?? MAX_BODY_BYTES;
 	const chunks: Buffer[] = [];
 	let size = 0;
 	let tooLarge = false;
@@ -456,7 +529,10 @@ class Connections {
 	private immediate: NodeJS.Immediate | undefined;
 	private closing = false;
 
-	constructor(private readonly curl: Libcurl) {}
+	constructor(
+		private readonly curl: Libcurl,
+		private readonly idlePollMs: number,
+	) {}
 
 	run(
 		easy: unknown,
@@ -581,7 +657,7 @@ class Connections {
 		if (this.transfers.size === 0) return;
 		// Something is still in flight: look again now if a socket is ready or
 		// libcurl wants to run at once, else after its own timeout, at most
-		// IDLE_POLL_MS.
+		// idlePollMs (IDLE_POLL_MS by default).
 		const ready = [0];
 		const polled: number = curl.multiPoll(this.multi, null, 0, 0, ready);
 		if (polled !== 0) {
@@ -594,8 +670,8 @@ class Connections {
 		}
 		const wait = [0];
 		curl.multiTimeout(this.multi, wait);
-		const due = wait[0]! < 0 ? IDLE_POLL_MS : wait[0]!;
-		this.schedule(ready[0]! > 0 ? 0 : Math.min(due, IDLE_POLL_MS));
+		const due = wait[0]! < 0 ? this.idlePollMs : wait[0]!;
+		this.schedule(ready[0]! > 0 ? 0 : Math.min(due, this.idlePollMs));
 	}
 }
 

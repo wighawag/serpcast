@@ -13,13 +13,14 @@ export {
 	DEFAULT_SESSION_IDLE_MS,
 	createSerpcast,
 	type ChainTransport,
+	type DecoyGuard,
 	type Engine,
 	type SearchOptions,
 	type SearchResponse,
 	type Serpcast,
 	type SerpcastOptions,
 } from './serpcast.js';
-export {isDecoy} from './decoy.js';
+export {DEFAULT_DECOY_RULE, isDecoy, type DecoyRule} from './decoy.js';
 export {
 	createMemoryStore,
 	type JsonValue,

@@ -27,6 +27,7 @@ import {
 import {untilAborted} from './code.js';
 import {SerpcastError} from './errors.js';
 import {parsePage} from './html.js';
+import {checkNumber} from './options.js';
 import type {TransportResponse, TransportSession} from './transport.js';
 
 /** One normalized search result; extra recipe fields pass through as strings. */
@@ -45,6 +46,8 @@ export interface RunRecipeOptions {
 	session: Pick<TransportSession, 'request'>;
 	/** Aborting rejects with the signal's reason. */
 	signal?: AbortSignal;
+	/** How many redirects are followed; one more is a `transport` error. Default 20 (Chrome's); 0 follows none. */
+	maxRedirects?: number;
 }
 
 /** Statuses a site answers with when it refuses or challenges the request. */
@@ -52,8 +55,8 @@ const BLOCKED_STATUS = new Set([202, 403, 429]);
 /** Statuses that mean the URL does not exist: the recipe's URL template is wrong. */
 const MISSING_STATUS = new Set([404, 410]);
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
-/** Chrome's limit (net::URLRequest kMaxRedirects). */
-const MAX_REDIRECTS = 20;
+/** Chrome's limit (net::URLRequest kMaxRedirects): the default `maxRedirects`. */
+export const MAX_REDIRECTS = 20;
 /** Where the snippet comes from, first present wins. */
 const SNIPPET_FIELDS = ['content', 'snippet', 'description'];
 
@@ -75,6 +78,11 @@ export async function runDeclarativeRecipe(
 			`${name}: uses "form", which needs a real browser: run it through searchcast`,
 		);
 	}
+	const maxRedirects =
+		checkNumber('maxRedirects', options.maxRedirects, {
+			integer: true,
+			zero: true,
+		}) ?? MAX_REDIRECTS;
 	options.signal?.throwIfAborted();
 	const timeoutMs = recipe.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const deadline = Date.now() + timeoutMs;
@@ -110,10 +118,10 @@ export async function runDeclarativeRecipe(
 			if (!REDIRECT_STATUS.has(response.status) || location === null) {
 				return {recipe: name, results: decide(recipe, response)};
 			}
-			if (redirects >= MAX_REDIRECTS) {
+			if (redirects >= maxRedirects) {
 				throw new SerpcastError(
 					'transport',
-					`${name}: more than ${MAX_REDIRECTS} redirects from ${url}`,
+					`${name}: more than ${maxRedirects} redirects from ${url}`,
 				);
 			}
 			url = resolveLocation(location, response.url, name);

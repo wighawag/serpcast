@@ -10,16 +10,20 @@ import {InstallError} from './install.js';
 import {SOURCE_FILE} from './recipes.js';
 import {readTarGz, type TarEntry} from './tar.js';
 
+/** The ceiling (and default) of `installRecipes`' `maxUnpackedBytes`. */
 export const MAX_UNPACKED_BYTES = 64 * 1024 * 1024;
 const RECIPE_FILE = /\.(?:mjs|js|json)$/;
 const SET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const NOTHING = 'Nothing was installed.';
 
 /** The archive's recipe files by name, or an InstallError naming the first entry that is not one. */
-export function recipeFiles(archive: Buffer): Map<string, Buffer> {
+export function recipeFiles(
+	archive: Buffer,
+	maxUnpackedBytes = MAX_UNPACKED_BYTES,
+): Map<string, Buffer> {
 	let entries: TarEntry[];
 	try {
-		entries = readTarGz(archive, MAX_UNPACKED_BYTES);
+		entries = readTarGz(archive, maxUnpackedBytes);
 	} catch (cause) {
 		throw new InstallError(`${(cause as Error).message}. ${NOTHING}`, {
 			cause,

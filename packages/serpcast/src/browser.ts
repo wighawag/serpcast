@@ -50,6 +50,8 @@ export interface BrowserEngine {
 				recipe?: string;
 				/** The whole request's time limit in ms. Default twice `DEFAULT_TIMEOUT_MS` (30 s). */
 				timeoutMs?: number;
+				/** The largest answer accepted, in bytes; a larger one is a `transport` error. Default 16 MiB. */
+				maxBodyBytes?: number;
 		  };
 }
 

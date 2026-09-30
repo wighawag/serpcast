@@ -1,6 +1,7 @@
 // `serpcast install-recipes`: install a set of recipes from a release archive
-// (a URL or a local file), only when the user types it (ADR 0002; imported by
-// cli.ts alone and not exported from the library). Code recipes are code with
+// (a URL or a local file), only when the user types it (ADR 0002): imported by
+// cli.ts and by `serpcast/install` (install-api.ts, for embedders), never by
+// the main entry. Code recipes are code with
 // full Node access, so what gets installed must be exactly what the user chose
 // to trust: the archive's sha256 is REQUIRED (for URLs and files alike) and
 // checked BEFORE anything is unpacked. The download reuses install-libcurl's
@@ -22,6 +23,8 @@
 // - Hidden files (a leading '.', such as macOS `._x.js` AppleDouble files
 //   and the reserved `.source.json`) are refused like other non-recipes.
 // - Size caps: 16 MiB archive, 64 MiB unpacked (recipes are small text).
+//   They are safety ceilings: `maxArchiveBytes` / `maxUnpackedBytes` may
+//   lower them, never raise them (2026-09-30, tunables-and-install-api).
 // - Replacing a set with `--force` is two renames (old set aside, new set in,
 //   old set deleted), so there is an instant with no set, never a mixed one.
 // - `manifest.json` is installed with the set (the set is a faithful copy of
@@ -51,6 +54,7 @@ import {
 import {join, resolve} from 'node:path';
 import {describeProxy, download} from './download.js';
 import {InstallError} from './install.js';
+import {checkNumber} from './options.js';
 import {recipesDir, SOURCE_FILE, type RecipeSetSource} from './recipes.js';
 import {
 	MAX_UNPACKED_BYTES,
@@ -74,6 +78,10 @@ export interface InstallRecipesOptions {
 	env?: NodeJS.ProcessEnv;
 	/** Progress lines (what is read from where, each file installed). */
 	log?: (line: string) => void;
+	/** Largest archive, in bytes. Default and ceiling `MAX_ARCHIVE_BYTES` (16 MiB): may only be lowered. */
+	maxArchiveBytes?: number;
+	/** Largest unpacked archive, in bytes. Default and ceiling `MAX_UNPACKED_BYTES` (64 MiB): may only be lowered. */
+	maxUnpackedBytes?: number;
 }
 
 export interface InstallRecipesResult {
@@ -87,7 +95,8 @@ export interface InstallRecipesResult {
 	status: 'installed' | 'replaced' | 'unchanged';
 }
 
-const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
+/** The ceiling (and default) of `installRecipes`' `maxArchiveBytes`. */
+export const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
 const IDLE_TIMEOUT_MS = 60_000;
 const NOTHING = 'Nothing was installed.';
 
@@ -98,6 +107,16 @@ export async function installRecipes(
 	options: InstallRecipesOptions,
 ): Promise<InstallRecipesResult> {
 	const log = options.log ?? (() => {});
+	const maxArchiveBytes =
+		checkNumber('maxArchiveBytes', options.maxArchiveBytes, {
+			integer: true,
+			max: MAX_ARCHIVE_BYTES,
+		}) ?? MAX_ARCHIVE_BYTES;
+	const maxUnpackedBytes =
+		checkNumber('maxUnpackedBytes', options.maxUnpackedBytes, {
+			integer: true,
+			max: MAX_UNPACKED_BYTES,
+		}) ?? MAX_UNPACKED_BYTES;
 	const pinned = (options.sha256 ?? '').toLowerCase();
 	if (!/^[0-9a-f]{64}$/.test(pinned)) {
 		throw new InstallError(
@@ -105,7 +124,7 @@ export async function installRecipes(
 		);
 	}
 	if (options.name !== undefined) setName(options.name, '--name');
-	const archive = await fetchArchive(source, options, log);
+	const archive = await fetchArchive(source, options, maxArchiveBytes, log);
 	const sha256 = hash(archive.body);
 	if (sha256 !== pinned) {
 		throw new InstallError(
@@ -113,7 +132,7 @@ export async function installRecipes(
 		);
 	}
 	log(`verified sha256 ${sha256} (pinned with --sha256)`);
-	const files = recipeFiles(archive.body);
+	const files = recipeFiles(archive.body, maxUnpackedBytes);
 	const manifest = readManifest(files.get('manifest.json'));
 	const name = options.name ?? manifest?.name;
 	if (name === undefined) {
@@ -184,6 +203,7 @@ export async function installRecipes(
 async function fetchArchive(
 	source: string,
 	options: InstallRecipesOptions,
+	maxArchiveBytes: number,
 	log: (line: string) => void,
 ): Promise<{body: Buffer; url?: string}> {
 	if (/^https?:\/\//i.test(source)) {
@@ -193,7 +213,7 @@ async function fetchArchive(
 			log(`downloading ${source}${via}`);
 			return await download(source, {
 				proxy: options.proxy,
-				maxBytes: MAX_ARCHIVE_BYTES,
+				maxBytes: maxArchiveBytes,
 				idleTimeoutMs: IDLE_TIMEOUT_MS,
 			});
 		} catch (cause) {
@@ -215,8 +235,8 @@ async function fetchArchive(
 	}
 	log(`reading ${resolve(source)}`);
 	try {
-		if (statSync(source).size > MAX_ARCHIVE_BYTES) {
-			throw new Error(`larger than ${MAX_ARCHIVE_BYTES} bytes`);
+		if (statSync(source).size > maxArchiveBytes) {
+			throw new Error(`larger than ${maxArchiveBytes} bytes`);
 		}
 		return {body: readFileSync(source)};
 	} catch (cause) {

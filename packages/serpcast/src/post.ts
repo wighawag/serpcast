@@ -14,8 +14,8 @@ import type {RequestOptions} from './transport.js';
 
 /**
  * A page's `fetch(url, {method: 'POST', body, credentials: 'include'})`.
- * `body` is a string (sent as UTF-8) or bytes, at most
- * `MAX_REQUEST_BODY_BYTES`; none sends an empty body. `contentType` defaults
+ * `body` is a string (sent as UTF-8) or bytes, at most the transport's
+ * `maxRequestBodyBytes` (default `MAX_REQUEST_BODY_BYTES`); none sends an empty body. `contentType` defaults
  * to what `fetch()` gives the body: `text/plain;charset=UTF-8` for a string,
  * none for bytes or no body.
  */
@@ -28,22 +28,23 @@ export interface PostOptions {
 	contentType?: string;
 }
 
-/** The largest request body a POST may carry, in bytes (1 MiB). */
+/** The largest request body a POST may carry by default, in bytes (1 MiB; the transport's `maxRequestBodyBytes`). */
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 
-/** Chromium's cap on a preflight's `access-control-max-age`, in seconds. */
-const MAX_PREFLIGHT_AGE_S = 2 * 60 * 60;
+/** Chromium's cap on a preflight's `access-control-max-age`, in seconds (the default of the transport's `maxPreflightAgeS`). */
+export const MAX_PREFLIGHT_AGE_S = 2 * 60 * 60;
 /** The Fetch standard's default preflight cache time, in seconds (measured). */
 const DEFAULT_PREFLIGHT_AGE_S = 5;
 
 /**
  * A POST's body as bytes and its `content-type`, or `undefined` for a GET.
  * Misuse (a POST that is not `fetch`, a body that is not a string or bytes,
- * or too large, a bad `content-type`, an unknown method) is a `recipe` error:
+ * or larger than `maxBytes`, a bad `content-type`, an unknown method) is a `recipe` error:
  * a code recipe is plain JS, so the types are checked here too.
  */
 export function postBody(
 	request: RequestOptions,
+	maxBytes = MAX_REQUEST_BODY_BYTES,
 ): {body: Uint8Array; contentType?: string} | undefined {
 	// Plain JS callers can pass anything: check the values, not the types.
 	const {method, kind, body, contentType} = request as {
@@ -75,10 +76,10 @@ export function postBody(
 			'a POST body must be a string or a Uint8Array',
 		);
 	}
-	if (bytes.length > MAX_REQUEST_BODY_BYTES) {
+	if (bytes.length > maxBytes) {
 		throw new SerpcastError(
 			'recipe',
-			`a POST body is limited to ${MAX_REQUEST_BODY_BYTES} bytes, got ${bytes.length}`,
+			`a POST body is limited to ${maxBytes} bytes, got ${bytes.length}`,
 		);
 	}
 	if (
@@ -104,13 +105,14 @@ export function postBody(
  * page's origin (a credentialed request does not accept `*`),
  * `access-control-allow-credentials: true` and `content-type` among
  * `access-control-allow-headers`. Returns how long to remember it, in
- * seconds; a refusal throws: statuses as the declarative runner maps them
+ * seconds, at most `maxAgeS` (Chromium's cap by default); a refusal throws: statuses as the declarative runner maps them
  * (202/403/429 `blocked`, 404/410 `recipe`, others `transport`), CORS
  * headers that do not allow the request `recipe`.
  */
 export function checkPreflight(
 	response: TransportResponse,
 	origin: string,
+	maxAgeS = MAX_PREFLIGHT_AGE_S,
 ): number {
 	const {status, url, headers} = response;
 	if (!(status >= 200 && status <= 299) || status === 202) {
@@ -141,6 +143,6 @@ export function checkPreflight(
 	const maxAge = headers.get('access-control-max-age');
 	const age = maxAge === null ? NaN : Number(maxAge.trim());
 	return Number.isInteger(age) && age >= 0
-		? Math.min(age, MAX_PREFLIGHT_AGE_S)
-		: DEFAULT_PREFLIGHT_AGE_S;
+		? Math.min(age, maxAgeS)
+		: Math.min(DEFAULT_PREFLIGHT_AGE_S, maxAgeS);
 }

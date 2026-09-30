@@ -14,6 +14,7 @@ import {request as httpsRequest} from 'node:https';
 import {DEFAULT_TIMEOUT_MS} from 'serpcast-recipe';
 import {normalizeResult, type SearchResult} from './declarative.js';
 import {SerpcastError} from './errors.js';
+import {checkNumber} from './options.js';
 
 /** A searchcast error code (HTTP `error` field or thrown `code`) as a serpcast error. */
 export function searchcastError(
@@ -34,23 +35,44 @@ export function searchcastError(
 	});
 }
 
-/** Largest endpoint answer accepted, in bytes. */
+/** Largest endpoint answer accepted by default, in bytes (the endpoint's `maxBodyBytes`). */
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 /** `GET /search?recipe=&q=` on a running `searchcast serve`, as serpcast results or a `SerpcastError`. */
 export async function searchEndpoint(
 	name: string,
-	target: {endpoint: string; recipe?: string; timeoutMs?: number},
+	target: {
+		endpoint: string;
+		recipe?: string;
+		timeoutMs?: number;
+		maxBodyBytes?: number;
+	},
 	query: string,
 	signal?: AbortSignal,
 ): Promise<SearchResult[]> {
 	const search = new URLSearchParams({recipe: target.recipe ?? name, q: query});
-	const timeoutMs = target.timeoutMs ?? 2 * DEFAULT_TIMEOUT_MS;
+	let timeoutMs: number;
+	let maxBytes: number;
+	try {
+		timeoutMs =
+			checkNumber('timeoutMs', target.timeoutMs, {integer: true}) ??
+			2 * DEFAULT_TIMEOUT_MS;
+		maxBytes =
+			checkNumber('maxBodyBytes', target.maxBodyBytes, {integer: true}) ??
+			MAX_BODY_BYTES;
+	} catch (cause) {
+		// A misconfigured engine, as for an unknown recipe name.
+		throw new SerpcastError(
+			'recipe',
+			`${name}: searchcast endpoint ${(cause as Error).message.replace(/^serpcast: /, '')}`,
+			{cause},
+		);
+	}
 	const timer = AbortSignal.timeout(timeoutMs);
 	const abort = signal ? AbortSignal.any([signal, timer]) : timer;
 	let answer: {status: number; body: string};
 	try {
-		answer = await get(target.endpoint, `/search?${search}`, abort);
+		answer = await get(target.endpoint, `/search?${search}`, abort, maxBytes);
 	} catch (error) {
 		if (signal?.aborted) throw signal.reason;
 		if (timer.aborted)
@@ -89,6 +111,7 @@ function get(
 	base: string,
 	path: string,
 	signal: AbortSignal,
+	maxBytes: number,
 ): Promise<{status: number; body: string}> {
 	let options: RequestOptions;
 	let send = httpRequest;
@@ -115,8 +138,9 @@ function get(
 			let size = 0;
 			res.on('data', (chunk: Buffer) => {
 				size += chunk.length;
-				if (size > MAX_BODY_BYTES) {
-					req.destroy(new Error(`answer larger than ${MAX_BODY_BYTES} bytes`));
+				if (size > maxBytes) {
+					reject(new Error(`answer larger than ${maxBytes} bytes`));
+					req.destroy();
 					return;
 				}
 				chunks.push(chunk);

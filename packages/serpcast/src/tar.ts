@@ -21,6 +21,11 @@ export function readTarGz(targz: Buffer, maxUnpackedBytes: number): TarEntry[] {
 	try {
 		tar = gunzipSync(targz, {maxOutputLength: maxUnpackedBytes});
 	} catch (cause) {
+		if ((cause as {code?: unknown}).code === 'ERR_BUFFER_TOO_LARGE')
+			throw new Error(
+				`the archive unpacks to more than ${maxUnpackedBytes} bytes`,
+				{cause},
+			);
 		throw new Error('the archive is not a readable .tar.gz', {cause});
 	}
 	const text = (start: number, length: number, from = tar) =>
