@@ -1,3 +1,5 @@
+> **serpcast-recipe has moved:** it is now `@searchcast/recipe` (https://github.com/wighawag/searchcast, `npm install @searchcast/recipe`), with the same format, the same API and the same messages. This repository is archived; its full history continues there.
+
 # serpcast-recipe
 
 The recipe format for keyless search engines: the schema, its TypeScript types and its validator. It is shared by [serpcast](https://github.com/wighawag/serpcast) (runs a recipe over plain HTTP with a real browser's fingerprint) and [searchcast](https://github.com/wighawag/searchcast) (runs a recipe in a real browser), so one recipe file describes a site for both. It has no runtime dependencies and is MIT licensed so projects under any license can share the format.

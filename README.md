@@ -1,3 +1,5 @@
+> **serpcast has moved:** it is now `searchcast` (https://github.com/wighawag/searchcast, `npm install searchcast`), and `serpcast-recipe` is now `@searchcast/recipe`. This repository is archived; its full history continues there. Upgrade notes: the searchcast README, 'Upgrading from serpcast'.
+
 # serpcast
 
 Keyless search engines over HTTP with a real browser's fingerprint, driven by recipes shared with [searchcast](https://github.com/wighawag/searchcast).
