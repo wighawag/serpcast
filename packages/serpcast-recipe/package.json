@@ -1,7 +1,7 @@
 {
 	"name": "serpcast-recipe",
 	"version": "0.2.0",
-	"description": "The shared recipe schema, types and validator for serpcast (HTTP) and searchcast (browser). One recipe file describes a site for both runners.",
+	"description": "Moved to @searchcast/recipe. The shared recipe schema, types and validator for serpcast (HTTP) and searchcast (browser). One recipe file describes a site for both runners.",
 	"license": "MIT",
 	"keywords": [
 		"search",
